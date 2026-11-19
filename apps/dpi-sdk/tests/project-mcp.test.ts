@@ -671,6 +671,48 @@ test("project MCP automatically infers safe first-use defaults from an empty ini
   }
 });
 
+test("project MCP auto-initialization binds remote sources without probing SSH", async () => {
+  const { root, database } = await fixture();
+  const workspace = join(root, "automatic-remote-project");
+  await mkdir(workspace);
+  const catalog = join(root, "automatic-remote-sources.json");
+  await writeFile(catalog, JSON.stringify({
+    version: 1,
+    sources: [{
+      id: "offline-remote",
+      label: "Offline remote",
+      root: join(root, "unmounted-remote"),
+      device: "linux",
+      readOnly: true,
+      sshHost: "durable-pi-test.invalid",
+      remoteRoot: "/home/test",
+    }],
+  }));
+  const server = new DurableProjectMcpServer({
+    cwd: workspace,
+    databasePath: database,
+    dataSourceCatalogPath: catalog,
+    autoInitialize: true,
+  });
+  try {
+    const startedAt = Date.now();
+    const listed = await server.handle({ jsonrpc: "2.0", id: "remote-list", method: "tools/list", params: {} });
+    assert.ok(Date.now() - startedAt < 1_000, "tools/list must not wait for remote source reachability");
+    const names = (listed?.result as { tools: Array<{ name: string }> }).tools.map((tool) => tool.name);
+    assert.equal(names.includes("get_durable_project"), true);
+    const registry = new ProjectRegistry(database);
+    const project = registry.list().find((candidate) => candidate.name === "automatic-remote-project");
+    registry.close();
+    assert.ok(project);
+    const savedCatalog = JSON.parse(await readFile(catalog, "utf8")) as {
+      sources: Array<{ id: string; projectIds?: string[] }>;
+    };
+    assert.deepEqual(savedCatalog.sources[0]?.projectIds, [project.id]);
+  } finally {
+    server.close();
+  }
+});
+
 test("project MCP idempotently initializes the current T3 workspace and binds selected data sources", async () => {
   const { root, database } = await fixture();
   const workspace = join(root, "new-t3-project");

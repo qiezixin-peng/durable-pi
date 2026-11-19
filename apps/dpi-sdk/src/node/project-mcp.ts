@@ -937,7 +937,12 @@ export class DurableProjectMcpServer {
       try {
         let boundSources: string[] = [];
         if (sourceIds.length) {
-          const sources = await bindingStore.setProjectSourcesAsync(projectId, sourceIds);
+          // Provider discovery asks for tools/list on its startup path. Auto-initializing
+          // a workspace must therefore remain local and deterministic: probing every
+          // remote SSH data source here can outlive T3's provider-probe deadline even
+          // though binding the sources itself has already succeeded. Reachability is
+          // intentionally refreshed by the data-source status/read paths instead.
+          const sources = bindingStore.setProjectSources(projectId, sourceIds);
           boundSources = sources.filter((source) => source.bound).map((source) => source.id);
           const reboundCatalog = new ReadOnlyDataSourceCatalog(this.dataSourceCatalogPath);
           for (const sourceId of sourceIds) {
