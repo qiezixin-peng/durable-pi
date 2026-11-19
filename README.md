@@ -27,6 +27,7 @@ The default operating model is deliberately conservative:
 Copy [`.env.example`](.env.example) to `.env` and change operator settings there. This is the central configuration file
 for paths, listeners, T3 peers, tunnel ports, polling intervals, model/runtime limits and optional provider settings.
 Secrets may also be placed in `.env`, which is ignored by Git; never put secrets in an example file.
+The complete precedence rules and variable groups are documented in [CONFIGURATION.md](CONFIGURATION.md).
 
 Copy [`dpi-network.example.yaml`](dpi-network.example.yaml) to `dpi-network.yaml` only when using the legacy standalone
 device network. It contains structured device inventory, while `.env` contains scalar runtime values. Both local files
