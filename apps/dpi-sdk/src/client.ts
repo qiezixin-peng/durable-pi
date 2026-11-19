@@ -217,12 +217,18 @@ export class AgentHandle {
   rename(name: string) {
     return this.client.request<AgentSummary>("PATCH", this.base, { name });
   }
-  send(content: string, whenBusy: WhenBusy = "followUp", requestId = newId(), waitMs?: number) {
+  send(
+    content: string,
+    whenBusy: WhenBusy = "followUp",
+    requestId = newId(),
+    waitMs?: number,
+    signal?: AbortSignal,
+  ) {
     return this.client.request<SendResult>(
       "POST",
       `${this.base}/messages`,
       { content, whenBusy, requestId, waitMs },
-      { timeoutMs: (waitMs ?? 0) + 20_000 },
+      { timeoutMs: (waitMs ?? 0) + 20_000, signal },
     );
   }
   withdraw(submissionId: number) {

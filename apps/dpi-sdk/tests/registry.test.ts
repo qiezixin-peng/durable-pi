@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { NetworkRegistry, toPublic } from "../src/node/registry.js";
 
@@ -11,7 +11,11 @@ test("registry CRUD, validation, token privacy, uid learning and UI state", asyn
   const dir = await mkdtemp(join(tmpdir(), "dpi-reg-"));
   const reg = new NetworkRegistry(join(dir, "network.sqlite"));
   try {
-    assert.equal((await stat(join(dir, "network.sqlite"))).mode & 0o777, 0o600);
+    // Windows reports synthesized POSIX mode bits; chmod does not model the
+    // underlying ACL. Keep the Unix privacy guarantee without asserting a
+    // value that Windows cannot represent.
+    if (platform() !== "win32")
+      assert.equal((await stat(join(dir, "network.sqlite"))).mode & 0o777, 0o600);
     assert.throws(() => reg.upsert({ id: "Bad Id", url: "http://x" }), /Device id/);
     assert.throws(() => reg.upsert({ id: "a", url: "ftp://x" }), /http or https/);
     assert.throws(() => reg.upsert({ id: "a", url: "http://x", token: "short" }), /32 characters/);

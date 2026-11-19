@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "registryHosts": ["registry.npmjs.org"],
+  "allowedLicenses": [
+    "(MPL-2.0 OR Apache-2.0)",
+    "0BSD",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unlicense"
+  ],
+  "allowedInstallScripts": [
+    "@google/genai@2.21.0",
+    "esbuild@0.28.2",
+    "fsevents@2.3.3",
+    "protobufjs@7.6.6"
+  ],
+  "productionAuditMaximum": {
+    "info": 0,
+    "low": 0,
+    "moderate": 0,
+    "high": 0,
+    "critical": 0
+  }
+}

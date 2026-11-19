@@ -14,6 +14,10 @@ const store = await Store.open({
   startDirs: config.startDirs,
   name: config.name,
   provider: config.provider,
+  authFile: config.authFile,
+  hubUrl: config.hubUrl,
+  hubToken: config.hubToken,
+  networkDeviceId: config.networkDeviceId,
 });
 
 const app = express();

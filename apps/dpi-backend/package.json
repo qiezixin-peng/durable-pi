@@ -7,7 +7,7 @@
     "start": "tsx src/main.ts",
     "dev": "tsx watch src/main.ts",
     "check": "tsc --noEmit -p .",
-    "test": "tsx --test tests/*.test.ts",
+    "test": "tsx --test --test-concurrency=1 tests/*.test.ts",
     "token": "tsx scripts/token.ts",
     "migrate-playground": "tsx scripts/migrate-playground.ts"
   },
@@ -25,5 +25,11 @@
   },
   "engines": {
     "node": ">=22.19.0"
+  },
+  "allowScripts": {
+    "@google/genai@2.21.0": true,
+    "esbuild@0.28.2": true,
+    "fsevents@2.3.3": true,
+    "protobufjs@7.6.6": true
   }
 }

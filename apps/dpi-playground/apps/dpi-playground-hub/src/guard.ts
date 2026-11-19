@@ -5,7 +5,8 @@ const err = (code: string, message: string) => ({ error: { code, message } });
 /**
  * The hub holds every device token and has no login of its own, so it only answers requests
  * whose Host is one it serves (blocks DNS rebinding) from its own origin (blocks CSRF), and
- * only accepts JSON writes (forces a CORS preflight that cross-origin pages cannot pass).
+ * accepts JSON writes plus the exact binary Artifact stream endpoint. The latter requires a
+ * custom filename header (also forces a browser CORS preflight) and rejects simple form types.
  */
 export function guard(allowedHosts: Set<string>): RequestHandler {
   return (req, res, next) => {
@@ -23,7 +24,12 @@ export function guard(allowedHosts: Set<string>): RequestHandler {
           .status(403)
           .json(err("unauthorized", "Cross-origin requests are not allowed"));
     }
-    if (["POST", "PUT", "PATCH"].includes(req.method) && !req.is("application/json"))
+    const binaryArtifact =
+      req.method === "POST" &&
+      /^\/projects\/[^/]+\/artifacts\/binary$/.test(req.path) &&
+      typeof req.headers["x-artifact-name"] === "string" &&
+      !["application/x-www-form-urlencoded", "multipart/form-data", "text/plain"].some((type) => Boolean(req.is(type)));
+    if (["POST", "PUT", "PATCH"].includes(req.method) && !req.is("application/json") && !binaryArtifact)
       return void res.status(415).json(err("invalid", "JSON required"));
     next();
   };

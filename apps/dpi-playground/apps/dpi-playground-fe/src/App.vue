@@ -12,6 +12,7 @@ import {
   Database,
   GitFork,
   Activity,
+  FolderKanban,
 } from "lucide-vue-next";
 import NetworkSidebar from "./components/NetworkSidebar.vue";
 import AgentView from "./components/AgentView.vue";
@@ -20,6 +21,7 @@ import OfflinePanel from "./components/OfflinePanel.vue";
 import NewSessionDialog from "./components/NewSessionDialog.vue";
 import PromptDialog from "./components/PromptDialog.vue";
 import ModelPicker from "./components/ModelPicker.vue";
+import ProjectDialog from "./components/ProjectDialog.vue";
 import {
   attempt,
   boot,
@@ -135,6 +137,12 @@ onBeforeUnmount(() => {
             streamState === "live" ? "Connected" : "Reconnecting"
           }}</span
         ><button
+          class="secondary small"
+          title="Projects across devices"
+          @click="ui.dialog = { kind: 'projects' }"
+        >
+          <FolderKanban :size="17" />Projects
+        </button><button
           class="icon-button"
           title="How this works"
           aria-label="How this works"
@@ -213,6 +221,7 @@ onBeforeUnmount(() => {
       @close="ui.dialog = undefined"
     />
     <ModelPicker v-else-if="ui.dialog?.kind === 'models'" @close="ui.dialog = undefined" />
+    <ProjectDialog v-else-if="ui.dialog?.kind === 'projects'" @close="ui.dialog = undefined" />
     <div
       v-else-if="ui.dialog?.kind === 'path'"
       class="modal-backdrop"

@@ -167,7 +167,7 @@ test("start_session: an agent starts an independent session, once per tool call"
   }
 });
 
-test("custom extensions: jev-damage-control blocks rm -rf only while on; system-prompts renders the checked prompts", async () => {
+test("custom extensions stack with mandatory platform policy; system-prompts renders the checked prompts", async () => {
   const t = await tempStore();
   const store = await t.open();
   try {
@@ -184,20 +184,21 @@ test("custom extensions: jev-damage-control blocks rm -rf only while on; system-
 
     let ext = await store.extensionsOf(row, c);
     assert.deepEqual(ext.extensions.map((e) => [e.name, e.enabled]), [["system-prompts", false], ["jev-damage-control", false]]);
-    assert.deepEqual(ext.builtIn.sort(), ["coding-tools", "playground"]);
+    assert.deepEqual(ext.builtIn.sort(), ["coding-tools", "platform-policy", "playground"]);
     assert.deepEqual(ext.extensions[0].prompts?.map((p) => [p.id, p.enabled]), [["smart_ass_opus_fix.md", true], ["one_sentence.md", false]]);
 
-    // jev-damage-control (offline rules under the faux provider) blocks the delete; turned off, it runs.
+    // jev-damage-control can add a verdict, while mandatory platform-policy still blocks destructive commands.
     await store.setExtension(row, c, { name: "jev-damage-control", enabled: true });
     await turn("!rm -rf doomed");
     assert.ok(existsSync(join(t.work, "doomed")));
-    assert.match(JSON.stringify((await store.entries(c, undefined, 5)).items), /jev-damage-control blocked this command/);
+    assert.match(JSON.stringify((await store.entries(c, undefined, 5)).items), /platform-policy blocked bash/);
     await turn("!ls");
     assert.match(JSON.stringify((await store.entries(c, undefined, 5)).items), /doomed/);
     ext = await store.setExtension(row, c, { name: "jev-damage-control", enabled: false });
     assert.equal(ext.extensions[1].enabled, false);
     await turn("!rm -rf doomed");
-    assert.ok(!existsSync(join(t.work, "doomed")));
+    assert.ok(existsSync(join(t.work, "doomed")));
+    assert.match(JSON.stringify((await store.entries(c, undefined, 5)).items), /platform-policy blocked bash/);
 
     // system-prompts: the checked prompts join the system prompt from the next request.
     await store.setExtension(row, c, { name: "system-prompts", enabled: true });
@@ -211,8 +212,7 @@ test("custom extensions: jev-damage-control blocks rm -rf only while on; system-
     // Extensions stack: turning one on keeps the other on.
     ext = await store.setExtension(row, c, { name: "jev-damage-control", enabled: true });
     assert.deepEqual(ext.extensions.map((e) => [e.name, e.enabled]), [["system-prompts", true], ["jev-damage-control", true]]);
-    assert.deepEqual(ext.builtIn, ["coding-tools", "playground"]);
-    await mkdir(join(t.work, "doomed"));
+    assert.deepEqual(ext.builtIn, ["coding-tools", "platform-policy", "playground"]);
     await turn("!rm -rf doomed");
     assert.ok(existsSync(join(t.work, "doomed")));
     ext = await store.setExtension(row, c, { name: "system-prompts", enabled: false });

@@ -39,6 +39,7 @@ import { randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT as ctx, withAbortSignal } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
+import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { curatedModels, defaultModelId } from "./model-catalog.js";
 import { fauxModels, installFaux } from "./faux.js";
 import {
@@ -61,11 +62,18 @@ import { createPlayground, Workspace, type SpawnSession } from "./extensions.js"
 import { createJobs, JobRuns, JOB_DEFS, jobDef, resolveJobInput, type Jobs } from "./jobs.js";
 import { ADDON_INFO, createAddons, PROMPTS, PromptChecklist, type Addons } from "./addons.js";
 import { JOB_RUNS_DOC } from "../../dpi-sdk/src/jobs.js";
+import { PiDurableHarnessAdapter } from "./harness-adapter.js";
+import { createPlatformPolicy } from "./platform-policy.js";
+import { JsonCredentialStore } from "./credential-store.js";
 
 export const DURABLE_VERSION = "1.0.3";
 
 /** Tools that create, update or delete: shell, files, App State, job runs, sessions, pages and subagents. */
 export const WRITE_TOOLS = new Set([
+  "send_project_message",
+  "remember_project_fact",
+  "create_project_agent",
+  "archive_project_agent",
   "bash",
   "write",
   "edit",
@@ -90,7 +98,11 @@ export interface StoreOptions {
   dataDir: string;
   startDirs: string[];
   name: string;
-  provider: "openrouter" | "faux";
+  provider: "openrouter" | "openai" | "faux";
+  authFile?: string;
+  hubUrl?: string;
+  hubToken?: string;
+  networkDeviceId?: string;
 }
 
 /** Agent documents a client may read or stream, by kind. */
@@ -141,7 +153,8 @@ const decodeCursor = (cursor?: string) => {
 };
 
 export class Store {
-  readonly models = createModels();
+  readonly runtime: PiDurableHarnessAdapter;
+  readonly models;
   readonly opened = new Map<string, Opened>();
   readonly errors = new Map<string, string>();
   readonly catalog: DatabaseSync;
@@ -177,8 +190,12 @@ export class Store {
   }
 
   private constructor(readonly options: StoreOptions) {
+    this.models = createModels({
+      ...(options.authFile ? { credentials: new JsonCredentialStore(options.authFile) } : {}),
+    });
+    this.runtime = new PiDurableHarnessAdapter(this, DURABLE_VERSION);
     if (options.provider === "faux") installFaux(this.models);
-    else {
+    else if (options.provider === "openrouter") {
       const provider = openrouterProvider();
       const catalog = provider.getModels();
       for (const model of curatedModels)
@@ -187,6 +204,8 @@ export class Store {
         ...provider,
         getModels: () => catalog.filter((m) => curatedModels.some((c) => c.id === m.id)),
       });
+    } else {
+      this.models.setProvider(openaiProvider());
     }
     mkdirSync(options.dataDir, { recursive: true, mode: 0o700 });
     this.unlockCatalog = lockFile(`${this.catalogPath}.lock`);
@@ -264,7 +283,15 @@ export class Store {
   }
 
   private defaultModel() {
-    return this.options.provider === "faux" ? fauxModels[0].id : defaultModelId;
+    if (this.options.provider === "faux") return fauxModels[0].id;
+    if (this.options.provider === "openrouter") return defaultModelId;
+    return (
+      ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"].find((id) =>
+        this.modelList.some((model) => model.id === id)
+      ) ??
+      this.modelList[0]?.id ??
+      "gpt-5.6-sol"
+    );
   }
 
   private async loadModels(): Promise<ModelInfo[]> {
@@ -278,7 +305,42 @@ export class Store {
         contextWindow: 128000,
         reasoning: false,
         cost: { input: 0, output: 0 },
+        capabilities: {
+          textInput: "supported",
+          imageInput: "unsupported",
+          toolCalling: "supported",
+          streaming: "supported",
+          structuredOutput: "unknown",
+          reasoning: "unsupported",
+          contextWindow: 128000,
+          maxOutputTokens: 8192,
+          source: "platform-verified",
+        },
       }));
+    if (this.options.provider === "openai") {
+      const available = await this.models.getAvailable("openai", { signal: AbortSignal.timeout(10_000) });
+      return available.map((m) => ({
+        id: m.id,
+        provider: "openai",
+        name: m.name,
+        tier: "subscription",
+        icon: "openai.png",
+        contextWindow: m.contextWindow,
+        reasoning: m.reasoning,
+        cost: { input: m.cost.input, output: m.cost.output },
+        capabilities: {
+          textInput: m.input.includes("text") ? "supported" : "unsupported",
+          imageInput: m.input.includes("image") ? "supported" : "unsupported",
+          toolCalling: "unknown",
+          streaming: "supported",
+          structuredOutput: "unknown",
+          reasoning: m.reasoning ? "supported" : "unsupported",
+          contextWindow: m.contextWindow,
+          maxOutputTokens: m.maxTokens,
+          source: "provider-metadata",
+        },
+      }));
+    }
     const available = await this.models.getAvailable("openrouter", { signal: AbortSignal.timeout(10000) });
     return curatedModels.flatMap((c) => {
       const m = available.find((m) => m.id === c.id);
@@ -293,6 +355,17 @@ export class Store {
               contextWindow: m.contextWindow,
               reasoning: m.reasoning,
               cost: { input: m.cost.input, output: m.cost.output },
+              capabilities: {
+                textInput: m.input.includes("text") ? "supported" : "unsupported",
+                imageInput: m.input.includes("image") ? "supported" : "unsupported",
+                toolCalling: "unknown",
+                streaming: "supported",
+                structuredOutput: "unknown",
+                reasoning: m.reasoning ? "supported" : "unsupported",
+                contextWindow: m.contextWindow,
+                maxOutputTokens: m.maxTokens,
+                source: "provider-metadata",
+              },
             },
           ]
         : [];
@@ -303,6 +376,13 @@ export class Store {
     if (this.options.provider === "faux") {
       const id = fauxModels.some((m) => m.id === model?.modelId) ? model!.modelId : fauxModels[0].id;
       return { provider: "faux", modelId: id };
+    }
+    if (this.options.provider === "openai") {
+      const modelId =
+        model?.provider === "openai" && this.models.getModel("openai", model.modelId)
+          ? model.modelId
+          : this.defaultModel();
+      return { provider: "openai", modelId };
     }
     const exact = model?.provider === "openrouter" ? model.modelId : `${model?.provider}/${model?.modelId}`;
     return {
@@ -318,7 +398,11 @@ export class Store {
     const known =
       this.options.provider === "faux"
         ? m.provider === "faux" && fauxModels.some((f) => f.id === m.modelId)
-        : m.provider === "openrouter" &&
+        : this.options.provider === "openai"
+          ? m.provider === "openai" &&
+            this.modelList.some((candidate) => candidate.id === m.modelId) &&
+            !!this.models.getModel(m.provider, m.modelId)
+          : m.provider === "openrouter" &&
           curatedModels.some((c) => c.id === m.modelId) &&
           !!this.models.getModel(m.provider, m.modelId);
     if (!known) throw invalid(`Unknown model ${m.provider}/${m.modelId}. Choose one from GET /v1/device models`);
@@ -505,9 +589,15 @@ export class Store {
       );
       const registry = createRegistry();
       registry.install(CodingTools);
+      const platformPolicy = createPlatformPolicy(row.cwd);
+      registry.install(platformPolicy);
       const jobs = createJobs({ shared: this.shared, sessionId: row.id });
       const compaction = () => this.compactionOf(row.id);
-      const playground = createPlayground(this.shared, row.id, this.spawnSession, jobs);
+      const playground = createPlayground(this.shared, row.id, this.spawnSession, jobs, {
+        hubUrl: this.options.hubUrl,
+        hubToken: this.options.hubToken,
+        deviceId: this.options.networkDeviceId,
+      });
       registry.install(playground);
       // Custom extensions are installed but not selected: an agent turns them on in its own selection.
       const addons = createAddons({ offline: this.options.provider === "faux" });
@@ -523,7 +613,7 @@ export class Store {
             await tx.doc(JobRuns, c.id);
           },
           settings: {
-            extensions: [CodingTools, playground],
+            extensions: [CodingTools, platformPolicy, playground],
             // Read at every use, so a PATCH .../compaction applies from the next request.
             get compaction() {
               return compaction();

@@ -3,6 +3,49 @@
 > **Proactive agents start working before you sit down. They don't wait for you to work. They work for you, then wait.**
 > Durable pi agents on any machine you own, driven from a web UI, a terminal or one curl.
 
+For the deployed T3 workflow in this repository, Windows A is the primary development/control machine. Linux B and
+macOS C are first-class read-only data sources and target-native adaptation environments; they are not assumed to be
+extra compute. The user works in T3 Code, while Durable Pi provides the project scheduler, policy, memory, audit and
+handoff layer behind it. The original standalone multi-device Pi network remains available as an optional legacy path.
+
+## This distribution
+
+This public repository extends the original Durable Pi demonstration into a project-oriented, cross-device development
+platform. T3 Code is the user interface; Durable Pi supplies durable scheduling, governed multi-Agent delegation,
+project memory, audit records, read-only cross-device data access and Git-safe Linux/macOS handoff workflows.
+
+The default operating model is deliberately conservative:
+
+- development and writes stay on the T3 Environment that owns the project;
+- another device is a bounded read-only data source unless a remote execution task is explicitly requested;
+- Coordinator, Scheduler, Agent role, Model and Executor are separate concepts;
+- write-capable Agents use serialized access or isolated Git worktrees;
+- credentials, local device inventory, databases and runtime artifacts are never committed.
+
+### Configuration
+
+Copy [`.env.example`](.env.example) to `.env` and change operator settings there. This is the central configuration file
+for paths, listeners, T3 peers, tunnel ports, polling intervals, model/runtime limits and optional provider settings.
+Secrets may also be placed in `.env`, which is ignored by Git; never put secrets in an example file.
+
+Copy [`dpi-network.example.yaml`](dpi-network.example.yaml) to `dpi-network.yaml` only when using the legacy standalone
+device network. It contains structured device inventory, while `.env` contains scalar runtime values. Both local files
+are ignored by Git. Command-line parameters and already exported environment variables override `.env`.
+
+```powershell
+Copy-Item .env.example .env
+Copy-Item dpi-network.example.yaml dpi-network.yaml
+.\windows\setup.ps1
+```
+
+After Windows setup, normal use is simply to open **T3 Code (Beta)** and select a project. See
+[WINDOWS.md](WINDOWS.md) for installation and [T3-INTEGRATION.md](T3-INTEGRATION.md) for the trust and routing model.
+
+### Repository safety
+
+The repository ships only templates. Runtime tokens stay under `~/.dpi`, project databases remain outside Git, and
+model credentials stay in their owning provider; none are copied into this repository.
+
 📺 Watch this video to get the full breakdown of this codebase: **[Pi Durable PROACTIVE Agents](https://youtu.be/DNDYYHsypZg)**
 
 <p align="center">
@@ -15,7 +58,52 @@
 
 ## Install
 
+### Current architecture: T3 Code control plane + Durable Pi governance
+
+This repository no longer treats its custom Hub as the only long-term agent control surface. T3 Code already owns the
+cross-platform desktop/web/mobile clients, authenticated Codex/Pi provider processes, durable threads, Git worktrees,
+background service, linked environments and remote device pairing. Durable Pi therefore concentrates on the parts that
+remain project-specific: policy, task admission, project memory, evidence, budgets, handoff packages and compatibility
+checks.
+
+The typed [`T3CodeClient`](apps/dpi-sdk/src/node/t3-code.ts), [`T3McpClient`](apps/dpi-sdk/src/node/t3-mcp.ts) and
+[`T3RuntimeGateway`](apps/dpi-sdk/src/node/t3-runtime.ts) are the boundary between those layers. They use a one-use pairing
+credential to mint a narrowly scoped MCP session, enforce a T3 mode ceiling on every request, launch or resume durable
+threads, and revoke the session after each gateway operation. Pi remains an optional T3 provider; Codex and Pi can
+coexist, and neither provider's credentials are copied into this repository. See [T3-INTEGRATION.md](T3-INTEGRATION.md) for the
+verified Windows setup and migration boundary.
+
+Windows users who want a project-isolated A/B/C device network can use the native PowerShell workflow in [WINDOWS.md](WINDOWS.md). It includes central Hub setup, URL workers, remote authentication and project-scoped agent messaging without requiring `zsh` or `just`.
+
+The Windows setup also installs a current-user `DurablePi-Local-Platform` scheduled task. It starts the loopback-only Backend/Hub at logon and performs a five-minute health check; recovery stops only PID-file processes whose command line still belongs to this checkout.
+
+All three local-runtime launchers run `scripts/repair-t3-browse-names.mjs` against the device home and managed project roots. T3 0.1.x rejects a complete folder listing when one immediate child has a whitespace-only or control-character name; the compatibility guard atomically gives only such unrepresentable entries a visible recovery name, preserves their contents in place, and records a permission-restricted JSONL audit log under `~/.dpi/logs`.
+
+### Starting a new project from T3
+
+1. Add or open the real project directory in T3 Code. T3 deliberately keeps project registration as a user/environment-management action.
+2. Tell the Coordinator to initialize the current directory for Durable multi-Agent work. Before initialization it can only list safe data-source options and initialize that exact T3 root.
+3. The Coordinator selects a Blank, Web, Python, Research or Cross-platform template and registers the A/B/C device connectors. Registration grants no file access by itself: when a task identifies a concrete remote folder, `bind_durable_data_folder` authorizes only that read-only folder for the current project.
+4. The Coordinator activates only the planned roles needed for the current task. Write-capable roles can use a managed Git worktree; T3 launches that existing worktree under the original user project, while Durable Pi persists scheduling, memory, policy and audit state.
+   Agents can use the read-only `durable-data` provider to search one known source or federate a bounded filename/text query across every Windows/Linux/macOS source bound to this project; results retain device identity and one offline source does not erase successful results from the others. Credential directories, `.env*`, auth files and key/certificate formats are excluded and cannot be read or staged as artifacts.
+5. For Linux/macOS adaptation, the Coordinator creates a Git-aware handoff and freezes a relay plan in T3. The plan fixes the project, handoff, bound device, repository, target slug and title; its exact PowerShell command remains subject to T3's native command approval. Execution relays only the current named branch into the target's managed `~/DurablePiProjects` root, verifies the checksum/revision, registers that folder in target-local T3, and binds a READY receipt back to the same plan before a remote Agent may be created. Remote Agent creation must explicitly select a model recorded as verified for that exact T3 Environment; the Windows model is never inherited across devices.
+6. After a target Agent commits its adaptation, the Coordinator freezes a return plan in T3. The approved command accepts only the matching READY relay target, requires a clean named remote branch, verifies a Git bundle and imports it into `refs/dpi/remotes/<source>/<slug>`. It never checks out or merges; backward or divergent history is rejected for explicit review.
+7. The Coordinator inspects the verified return before integration. Only a clean `REMOTE_AHEAD` relationship can produce a frozen fast-forward plan. T3 approval then runs a hook-disabled `git merge --ff-only`; exact branch, base HEAD, managed ref and target revision are rechecked, and an APPLIED receipt makes retries idempotent. Equal, dirty, detached, backward or divergent states are rejected.
+8. Divergence is handled away from the main checkout. `prepare_durable_integration_agent` creates a deterministic managed worktree at the current Windows revision and a temporary `WORKSPACE_WRITE` Resolver Agent bound to that path. The remote ref is reviewed, merged, tested and committed only on the isolated integration branch.
+9. After review, `plan_durable_integration_promotion` proves that the clean Resolver result contains both the unchanged Windows base and the exact receipt-verified remote revision. It freezes the managed integration branch and returns the same approval-gated, hook-disabled `merge --ff-only` executor. If main moved, the worktree is dirty, or the remote commit is absent, promotion is rejected without touching main.
+10. Once the APPLIED receipt exists, `finalize_durable_integration_agent` verifies main and the retained integration branch still equal the promoted revision, removes the clean managed worktree, and archives the temporary Resolver. Its branch, commits, receipts and audit events remain available for traceability.
+
+No first “real repository” has to be pre-registered in the legacy Hub, and users do not need to remember internal device-source IDs.
+
+The Windows project Hub now also owns a durable project-task queue with atomic SQLite claims, leases, attempts and fencing epochs. This queue schedules work across agents; Pi Durable still owns each agent's model/tool loop and session recovery through the backend's typed SDK Harness Adapter.
+
+Every Pi session now includes a mandatory `platform-policy` extension. Its `beforeTool` hook rejects file operations that escape the session root (including existing link/junction escapes) and a conservative set of destructive shell commands before execution. Optional model-based guards may add restrictions but cannot disable this deterministic baseline.
+
 ### Agentic Install
+
+> This upstream-style install path is for the legacy standalone Pi network and its demo. The current Windows/T3
+> control-plane path above reuses the already authenticated Codex login through T3/App Server and does **not** require
+> an OpenRouter key or a second Pi login. Pi remains optional; follow [WINDOWS.md](WINDOWS.md) for the deployed setup.
 
 Open the repository in Claude Code (or Pi, or your favorite agentic coding tool) and run:
 
@@ -27,7 +115,7 @@ The command lives in [`.claude/commands/install.md`](.claude/commands/install.md
 
 ### Manual Install
 
-**Prereqs:** [Node.js 24](https://nodejs.org) (via [nvm](https://github.com/nvm-sh/nvm)), [`just`](https://github.com/casey/just), `zsh` (macOS ships it), an [OpenRouter](https://openrouter.ai) API key. Remote devices need passwordless `ssh`, and exe.dev VMs need an [exe.dev](https://exe.dev) account.
+**Legacy standalone-Pi prerequisites:** [Node.js 24](https://nodejs.org) (via [nvm](https://github.com/nvm-sh/nvm)), [`just`](https://github.com/casey/just), `zsh` (macOS ships it), an [OpenRouter](https://openrouter.ai) API key. Remote devices need passwordless `ssh`, and exe.dev VMs need an [exe.dev](https://exe.dev) account.
 
 ```bash
 cp .env.example .env                           # set OPENROUTER_API_KEY; copied into each device's backend.env, never sent to clients
@@ -298,6 +386,8 @@ durable-pi/
 just                       # command groups: net, backend, hub, tui, test, proactive
 just install               # npm install for the four network apps
 just check                 # type checks and unit tests, every app (free, no network)
+node scripts/generate-sbom.mjs # verify pinned registries, integrity, licenses and install-script allowlist; refresh CycloneDX SBOM
+node scripts/audit-production-dependencies.mjs # require zero known vulnerabilities in all three production dependency graphs
 just backend run           # this machine's device server on :4780
 just hub start             # web UI on :4781
 just tui attach <target>   # <device>[:<session>[:<agent>]]

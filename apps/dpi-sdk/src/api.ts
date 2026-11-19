@@ -53,6 +53,22 @@ export interface ModelInfo {
   contextWindow: number;
   reasoning: boolean;
   cost: { input: number; output: number };
+  capabilities: ModelCapabilities;
+}
+
+export type ModelCapabilitySupport = "supported" | "unsupported" | "unknown";
+
+/** Provider-neutral facts used for safe model routing. Unknown is never treated as supported. */
+export interface ModelCapabilities {
+  textInput: ModelCapabilitySupport;
+  imageInput: ModelCapabilitySupport;
+  toolCalling: ModelCapabilitySupport;
+  streaming: ModelCapabilitySupport;
+  structuredOutput: ModelCapabilitySupport;
+  reasoning: ModelCapabilitySupport;
+  contextWindow: number;
+  maxOutputTokens: number;
+  source: "provider-metadata" | "platform-verified";
 }
 
 export interface DeviceInfo {
@@ -165,6 +181,326 @@ export interface DeviceTree {
   at: number;
 }
 
+// ---------------------------------------------------------------- projects
+
+/** A project groups agents that may live in sessions on different devices. */
+export interface ProjectMember {
+  id: string;
+  projectId: string;
+  deviceId: string;
+  sessionId: string;
+  agentId: string;
+  name: string;
+  role: string;
+  permissionProfile: ProjectPermissionProfile;
+  executor: "pi" | "codex";
+  model?: string;
+  allowModelFallback: boolean;
+  fallbackModels: string[];
+  cwd?: string;
+  /** T3 linked-environment id. Omitted means this machine. */
+  t3EnvironmentId?: string;
+  threadId?: string;
+  threadModel?: string;
+  threadRuntime?: "codex-app-server" | "t3";
+  /** Provider instance that owns the persisted thread. A missing value is treated
+   * as unknown and must never be reused across a provider boundary. */
+  threadProvider?: string;
+  codexToolsVersion?: number;
+  temporary: boolean;
+  lifecycleState: "ACTIVE" | "IDLE" | "ARCHIVED";
+  parentMemberId?: string;
+  scopeTaskId?: string;
+  spawnRequestId?: string;
+  archivedAt?: number;
+  createdAt: number;
+}
+
+export type ProjectPermissionProfile = "ROLE_DEFAULT" | "READ_ONLY" | "WORKSPACE_WRITE";
+
+/** A source-device member description imported for deliberate, local re-binding. */
+export interface ProjectAgentBlueprint {
+  sourceHandoffId: string;
+  sourceProjectId: string;
+  id: string;
+  name: string;
+  role: string;
+  permissionProfile: ProjectPermissionProfile;
+  executor: "pi" | "codex";
+  model: string | null;
+  allowModelFallback: boolean;
+  fallbackModels: string[];
+  cwd: string | null;
+  temporary: boolean;
+  lifecycleState: "ACTIVE" | "IDLE" | "ARCHIVED";
+  bindingState: "UNBOUND" | "BOUND" | "SOURCE_TEMPORARY";
+  boundMemberId?: string;
+}
+
+export interface ProjectAgentBlueprintBinding {
+  blueprint: ProjectAgentBlueprint;
+  member: ProjectMember;
+}
+
+export interface ProjectWorktree {
+  id: string;
+  projectId: string;
+  label: string;
+  repositoryRoot: string;
+  path: string;
+  branch: string;
+  baseRevision: string;
+  state: "PROVISIONING" | "ACTIVE" | "FAILED" | "REMOVED";
+  headRevision?: string;
+  dirty?: boolean;
+  baseIsAncestor?: boolean;
+  error?: string;
+  createdAt: number;
+  checkedAt?: number;
+}
+
+export interface ProjectSummary {
+  id: string;
+  templateId?: string;
+  templatePlan: ProjectTemplateRole[];
+  name: string;
+  description: string;
+  autonomyMode: ProjectAutonomyMode;
+  tokenLimit24h?: number;
+  maxTaskTokens?: number;
+  maxCoordinationDepth?: number;
+  maxDelegatedTasksPerTurn?: number;
+  maxActiveTasks?: number;
+  maxConcurrentTasks?: number;
+  createdAt: number;
+  updatedAt: number;
+  members: ProjectMember[];
+}
+
+export interface ProjectTemplateRole {
+  role: string;
+  permissionProfile: ProjectPermissionProfile;
+}
+
+export interface ProjectTeamPlan {
+  templateId?: string | null;
+  roles: Array<ProjectTemplateRole & {
+    status: "BOUND" | "UNBOUND";
+    permissionAligned: boolean;
+    members: Array<{
+      id: string;
+      name: string;
+      executor: "pi" | "codex";
+      permissionProfile: ProjectPermissionProfile;
+      workspace?: string;
+    }>;
+  }>;
+}
+
+export interface ProjectTemplate {
+  id: string;
+  name: string;
+  description: string;
+  autonomyMode: ProjectAutonomyMode;
+  maxCoordinationDepth: number;
+  maxDelegatedTasksPerTurn: number;
+  maxActiveTasks: number;
+  maxConcurrentTasks: number;
+  suggestedRoles: ProjectTemplateRole[];
+}
+
+export type ProjectAutonomyMode = "SUPERVISED" | "AUTHORIZED_AUTONOMY" | "RESTRICTED_UNATTENDED";
+
+export interface ProjectEvent {
+  id: number;
+  projectId: string;
+  kind: string;
+  fromMemberId?: string;
+  toMemberId?: string;
+  detail: unknown;
+  createdAt: number;
+}
+
+export interface ProjectToolCall {
+  id: string;
+  projectId: string;
+  taskId: string;
+  attemptId: string;
+  fenceEpoch: number;
+  memberId: string;
+  itemId: string;
+  type: string;
+  status: "STARTED" | "COMPLETED" | "FAILED";
+  evidenceKind: "TEST" | "BUILD" | "FILE_CHANGE" | "TOOL";
+  request?: unknown;
+  result?: unknown;
+  exitCode?: number;
+  startedAt: number;
+  completedAt?: number;
+}
+
+export interface ProjectArtifact {
+  id: string;
+  projectId: string;
+  taskId?: string;
+  name: string;
+  kind: string;
+  mimeType: string;
+  sha256: string;
+  sizeBytes: number;
+  status: "ACTIVE" | "EXPIRED";
+  includeInHandoff: boolean;
+  expiresAt?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ProjectModelUsage {
+  id: string;
+  projectId: string;
+  taskId: string;
+  attemptId?: string;
+  fenceEpoch: number;
+  memberId: string;
+  provider: string;
+  model: string;
+  threadId?: string;
+  turnId?: string;
+  inputTokens: number;
+  cachedInputTokens: number;
+  cacheWriteInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+  totalTokens: number;
+  contextWindow?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ProjectUsageSummary {
+  projectId: string;
+  requests: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  cacheWriteInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+  totalTokens: number;
+}
+
+export interface PlatformObservabilitySummary {
+  at: number;
+  projects: number;
+  agents: { active: number; temporary: number; archived: number };
+  tasks: Record<ProjectTaskStatus, number>;
+  pendingApprovals: number;
+  artifacts: { active: number; expired: number; activeBytes: number };
+  handoffs: number;
+  worktrees: { active: number; failed: number };
+  toolCalls: {
+    started: number;
+    completed: number;
+    failed: number;
+    testsPassed: number;
+    testsFailed: number;
+    buildsPassed: number;
+    buildsFailed: number;
+  };
+  tokenUsage24h: number;
+}
+
+export interface ProjectHandoff {
+  id: string;
+  projectId: string;
+  status: "READY" | "FAILED";
+  directory: string;
+  manifestSha256: string;
+  artifactCount: number;
+  totalBytes: number;
+  createdAt: number;
+}
+
+export interface ProjectHandoffValidation {
+  handoffId: string;
+  projectId: string;
+  valid: boolean;
+  schemaVersion: number;
+  handoffProtocol: string;
+  artifactCount: number;
+  verifiedBytes: number;
+  manifestSha256: string;
+  checkedAt: number;
+}
+
+export interface ProjectHandoffGitCheck {
+  handoffId: string;
+  projectId: string;
+  sourceRevision: string;
+  targetRevision: string;
+  sourceCommitPresent: boolean;
+  sourceIsAncestor: boolean;
+  targetDirty: boolean;
+  status: "SAME" | "TARGET_AHEAD" | "TARGET_DIRTY" | "DIVERGED" | "SOURCE_MISSING";
+  safeToApply: boolean;
+  checkedAt: number;
+}
+
+export interface ProjectHandoffImportResult {
+  bundleName: string;
+  sourceHandoffId: string;
+  project: ProjectSummary;
+  memoriesImported: number;
+  artifactsImported: number;
+  verifiedBytes: number;
+  manifestSha256: string;
+  importedAt: number;
+}
+
+export type ProjectMemoryStatus = "ACTIVE" | "EXPIRED";
+
+export interface ProjectMemory {
+  id: string;
+  projectId: string;
+  key: string;
+  value: unknown;
+  sourceType: string;
+  sourceId?: string;
+  memberId?: string;
+  status: ProjectMemoryStatus;
+  expiresAt?: number;
+  version: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ProjectMemoryRevision extends ProjectMemory {
+  revisionId: number;
+}
+
+export type ProjectApprovalStatus =
+  | "PENDING"
+  | "APPROVED"
+  | "DENIED"
+  | "REVOKED"
+  | "EXPIRED"
+  | "CONSUMED";
+
+export interface ProjectApproval {
+  id: string;
+  projectId: string;
+  operation: unknown;
+  operationHash: string;
+  requestedBy: string;
+  status: ProjectApprovalStatus;
+  expiresAt: number;
+  decidedBy?: string;
+  decidedAt?: number;
+  consumedBy?: string;
+  consumedAt?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface AgentConfig {
   model?: { provider: string; modelId: string };
   thinkingLevel?: ThinkingLevel;
@@ -243,6 +579,130 @@ export interface Page<T> {
 }
 
 // ---------------------------------------------------------------- tasks and usage
+
+/** Hub-level project task state. Pi's internal tool tasks remain separate. */
+export type ProjectTaskStatus =
+  | "QUEUED"
+  | "WAITING_DEPENDENCY"
+  | "RUNNING"
+  | "RETRYING"
+  | "WAITING_DEVICE"
+  | "WAITING_APPROVAL"
+  | "PAUSED"
+  | "COMPLETED"
+  | "FAILED"
+  | "CANCELLED";
+
+export type UnknownSideEffectResolution = "RETRY" | "MARK_COMPLETED";
+
+export interface ProjectTask {
+  id: string;
+  projectId: string;
+  title: string;
+  input: unknown;
+  dependsOn: string[];
+  status: ProjectTaskStatus;
+  priority: number;
+  maxAttempts: number;
+  timeoutMs?: number;
+  attemptCount: number;
+  /** Attempts deferred by external availability or user input; excluded from maxAttempts. */
+  deferredAttemptCount?: number;
+  availableAt: number;
+  leaseOwner?: string;
+  leaseUntil?: number;
+  fenceEpoch: number;
+  version: number;
+  result?: unknown;
+  error?: unknown;
+  pausedFromStatus?: ProjectTaskStatus;
+  waitingDeviceId?: string;
+  waitingApprovalId?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ProjectTaskLease extends ProjectTask {
+  status: "RUNNING";
+  leaseOwner: string;
+  leaseUntil: number;
+  attemptId: string;
+  attemptNumber: number;
+  /** Approval left by an expired WAITING_APPROVAL lease; the new worker must resolve it before dispatch. */
+  supersededApprovalId?: string;
+}
+
+export interface ProjectTaskAttempt {
+  id: string;
+  taskId: string;
+  attemptNumber: number;
+  workerId: string;
+  fenceEpoch: number;
+  status: "RUNNING" | "COMPLETED" | "FAILED" | "EXPIRED" | "CANCELLED" | "WAITING_DEVICE" | "WAITING_PROVIDER" | "WAITING_USER";
+  startedAt: number;
+  heartbeatAt: number;
+  finishedAt?: number;
+  runtime?: ProjectTaskRuntimeBinding;
+  result?: unknown;
+  error?: unknown;
+}
+
+/** Correlates one fenced attempt with the execution owned by an external harness. */
+export interface ProjectTaskRuntimeBinding {
+  kind: "t3" | "codex-app-server" | "pi-durable";
+  threadId: string;
+  runId?: string;
+  environmentId?: string;
+  provider?: string;
+  model?: string;
+}
+
+/** Durable proof that an external Agent execution already produced a result. */
+export interface ProjectTaskExecutionReceipt {
+  taskId: string;
+  projectId: string;
+  requestSha256: string;
+  result: unknown;
+  attemptId: string;
+  fenceEpoch: number;
+  createdAt: number;
+}
+
+/** First executable project-task kind: route one durable task to one project member Agent. */
+export type ProjectMessageType =
+  | "task_assignment"
+  | "task_result"
+  | "task_failed"
+  | "task_blocked"
+  | "question"
+  | "approval_request"
+  | "progress_update"
+  | "context_update";
+
+export interface ProjectAgentMessageTaskInput {
+  kind: "agent.message";
+  memberId: string;
+  content: string;
+  messageType?: ProjectMessageType;
+  messageId?: string;
+  /** Authenticated project sender when the task originated as an Agent message. */
+  fromMemberId?: string;
+  correlationId?: string;
+  payload?: unknown;
+  whenBusy?: WhenBusy;
+  waitMs?: number;
+}
+
+export interface ProjectAgentMessageResult {
+  type: "task_result";
+  messageId: string;
+  correlationId: string;
+  inReplyTo: string;
+  fromMemberId: string;
+  taskId: string;
+  submissionId: string | number;
+  answer: { entryId: number; text: string };
+}
 
 export interface TaskNode {
   id: number;

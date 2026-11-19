@@ -100,7 +100,13 @@ export type SpawnSession = (input: {
   prompt?: string;
 }) => Promise<{ session: SessionSummary; submissionId?: number }>;
 
-export function createPlayground(shared: SharedState, sessionId: string, spawn: SpawnSession, jobs: Jobs) {
+export function createPlayground(
+  shared: SharedState,
+  sessionId: string,
+  spawn: SpawnSession,
+  jobs: Jobs,
+  collaboration: { hubUrl?: string; hubToken?: string; deviceId?: string } = {},
+) {
   const readAppState = defineTool({
     name: "read_state",
     description:
@@ -483,6 +489,249 @@ export function createPlayground(shared: SharedState, sessionId: string, spawn: 
       control: { handoff: args.note },
     }),
   });
+  const membershipUrl = (agentId: number) => {
+    if (!collaboration.hubUrl || !collaboration.deviceId)
+      throw Error("Project collaboration is not configured on this device");
+    const query = new URLSearchParams({
+      deviceId: collaboration.deviceId,
+      sessionId,
+      agentId: String(agentId),
+    });
+    return `${collaboration.hubUrl}/api/project-memberships?${query}`;
+  };
+  const collaborationHeaders = () => ({
+    ...(collaboration.hubToken ? { authorization: `Bearer ${collaboration.hubToken}` } : {}),
+    ...(collaboration.deviceId ? { "x-dpi-device-id": collaboration.deviceId } : {}),
+  });
+  const memberships = async (agentId: number) => {
+    const response = await fetch(membershipUrl(agentId), {
+      headers: collaborationHeaders(),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const body = (await response.json().catch(() => undefined)) as
+      | { memberships?: Array<{ project: { id: string; name: string; members: Array<{ id: string; name: string; role: string; executor: string; temporary?: boolean }> }; self: { id: string; role: string } }> }
+      | { error?: { message?: string } }
+      | undefined;
+    if (!response.ok)
+      throw Error(
+        (body && "error" in body ? body.error?.message : undefined) ??
+          `Project hub returned ${response.status}`,
+      );
+    return body && "memberships" in body ? (body.memberships ?? []) : [];
+  };
+  const listProjectAgents = defineTool({
+    name: "list_project_agents",
+    description:
+      "List the projects this agent belongs to and every agent address inside those project boundaries. Use this before asking an agent on another device for information or help.",
+    parameters: Type.Object({}),
+    replay: "safe",
+    execute: async (_args, api) => ({
+      content: [{ type: "text", text: JSON.stringify(await memberships(api.conversationId)) }],
+    }),
+  });
+  const listProjectMemories = defineTool({
+    name: "list_project_memories",
+    description:
+      "List this agent's trusted project memory: shared project facts plus only this agent's private facts. Other agents' private memory is never returned.",
+    parameters: Type.Object({ project_id: Type.String() }),
+    replay: "safe",
+    execute: async (args, api) => {
+      if (!collaboration.hubUrl || !collaboration.deviceId)
+        throw Error("Project collaboration is not configured on this device");
+      const membership = (await memberships(api.conversationId)).find(
+        (item) => item.project.id === args.project_id,
+      );
+      if (!membership) throw Error(`This agent does not belong to project ${args.project_id}`);
+      const query = new URLSearchParams({
+        deviceId: collaboration.deviceId,
+        sessionId,
+        agentId: String(api.conversationId),
+      });
+      const response = await fetch(
+        `${collaboration.hubUrl}/api/projects/${encodeURIComponent(args.project_id)}/agent-memories?${query}`,
+        {
+          headers: collaborationHeaders(),
+          signal: AbortSignal.timeout(10_000),
+        },
+      );
+      const result = (await response.json().catch(() => undefined)) as
+        | { error?: { message?: string } }
+        | unknown;
+      if (!response.ok)
+        throw Error(
+          (result && typeof result === "object" && "error" in result
+            ? (result as { error?: { message?: string } }).error?.message
+            : undefined) ?? `Project hub returned ${response.status}`,
+        );
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    },
+  });
+  const rememberProjectFact = defineTool({
+    name: "remember_project_fact",
+    description:
+      "Save a durable project fact. Private is the safe default and is visible only to this agent. Only a project Coordinator may choose shared. Read current memories first and pass expected_version when updating an existing fact.",
+    parameters: Type.Object({
+      project_id: Type.String(),
+      key: Type.String({ description: "Stable dotted key, for example debugging.root_cause." }),
+      value: Type.String({ description: "Plain text, or JSON text for a structured value." }),
+      scope: Type.Optional(Type.Union([Type.Literal("private"), Type.Literal("shared")])),
+      expected_version: Type.Optional(Type.Integer({ minimum: 1 })),
+    }),
+    execute: async (args, api) => {
+      const membership = (await memberships(api.conversationId)).find(
+        (item) => item.project.id === args.project_id,
+      );
+      if (!membership) throw Error(`This agent does not belong to project ${args.project_id}`);
+      let value: unknown = args.value;
+      try {
+        value = JSON.parse(args.value);
+      } catch {
+        // Plain text is also a valid durable fact.
+      }
+      const result = await projectPost(
+        `/api/projects/${encodeURIComponent(args.project_id)}/agent-memories`,
+        {
+          deviceId: collaboration.deviceId,
+          sessionId,
+          agentId: String(api.conversationId),
+          key: args.key,
+          value,
+          scope: args.scope ?? "private",
+          expectedVersion: args.expected_version,
+          requestId: `project-memory:${sessionId}:${api.taskId}`,
+        },
+      );
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    },
+  });
+  const sendProjectMessage = defineTool({
+    name: "send_project_message",
+    description:
+      "Send a task or question to an agent that belongs to the same project, including an agent on another device. Call list_project_agents first and use its project id and target member id. The target may inspect its own local files and reply through its durable conversation.",
+    parameters: Type.Object({
+      project_id: Type.String(),
+      target_member_id: Type.String(),
+      message: Type.String(),
+      message_type: Type.Optional(
+        Type.Union([
+          Type.Literal("task_assignment"), Type.Literal("task_result"), Type.Literal("task_failed"),
+          Type.Literal("task_blocked"), Type.Literal("question"), Type.Literal("approval_request"),
+          Type.Literal("progress_update"), Type.Literal("context_update"),
+        ]),
+      ),
+      correlation_id: Type.Optional(Type.String()),
+      timeout_ms: Type.Optional(Type.Number({ minimum: 1000, maximum: 86400000 })),
+      wait: Type.Optional(
+        Type.Boolean({ description: "Wait up to five minutes for the target's answer. Default true." }),
+      ),
+    }),
+    replay: "safe",
+    execute: async (args, api) => {
+      if (!collaboration.hubUrl) throw Error("Project collaboration is not configured on this device");
+      const mine = await memberships(api.conversationId);
+      const membership = mine.find((item) => item.project.id === args.project_id);
+      if (!membership) throw Error(`This agent does not belong to project ${args.project_id}`);
+      const response = await fetch(
+        `${collaboration.hubUrl}/api/projects/${encodeURIComponent(args.project_id)}/messages`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...collaborationHeaders(),
+          },
+          body: JSON.stringify({
+            fromMemberId: membership.self.id,
+            toMemberId: args.target_member_id,
+            content: args.message,
+            messageType: args.message_type ?? "task_assignment",
+            correlationId: args.correlation_id,
+            timeoutMs: args.timeout_ms,
+            whenBusy: "followUp",
+            requestId: `project:${sessionId}:${api.taskId}`,
+            waitMs: args.wait === false ? undefined : 300_000,
+          }),
+          signal: AbortSignal.timeout(args.wait === false ? 20_000 : 320_000),
+        },
+      );
+      const result = (await response.json().catch(() => undefined)) as
+        | { error?: { message?: string } }
+        | unknown;
+      if (!response.ok)
+        throw Error(
+          (result && typeof result === "object" && "error" in result
+            ? (result as { error?: { message?: string } }).error?.message
+            : undefined) ?? `Project hub returned ${response.status}`,
+        );
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    },
+  });
+  const projectPost = async (path: string, body: unknown) => {
+    if (!collaboration.hubUrl) throw Error("Project collaboration is not configured on this device");
+    const response = await fetch(`${collaboration.hubUrl}${path}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...collaborationHeaders(),
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(20_000),
+    });
+    const result = (await response.json().catch(() => undefined)) as { error?: { message?: string } } | unknown;
+    if (!response.ok)
+      throw Error(
+        (result && typeof result === "object" && "error" in result
+          ? (result as { error?: { message?: string } }).error?.message
+          : undefined) ?? `Project hub returned ${response.status}`,
+      );
+    return result;
+  };
+  const createProjectAgent = defineTool({
+    name: "create_project_agent",
+    description:
+      "Create a temporary local Codex agent inside a project. Only a Coordinator may call this. The new agent safely clones the model and working directory of an existing local Codex template member; it cannot choose an arbitrary filesystem path. Archive it when its scoped work is complete.",
+    parameters: Type.Object({
+      project_id: Type.String(),
+      template_member_id: Type.String(),
+      role: Type.String(),
+      permission_profile: Type.Optional(
+        Type.Union([Type.Literal("ROLE_DEFAULT"), Type.Literal("READ_ONLY"), Type.Literal("WORKSPACE_WRITE")]),
+      ),
+      name: Type.Optional(Type.String()),
+      scope_task_id: Type.Optional(Type.String()),
+    }),
+    execute: async (args, api) => {
+      const membership = (await memberships(api.conversationId)).find((item) => item.project.id === args.project_id);
+      if (!membership) throw Error(`This agent does not belong to project ${args.project_id}`);
+      if (membership.self.role.toLowerCase() !== "coordinator") throw Error("Only a project Coordinator can create temporary agents");
+      const result = await projectPost(
+        `/api/projects/${encodeURIComponent(args.project_id)}/members/spawn-temporary`,
+        {
+          requestedByMemberId: membership.self.id,
+          templateMemberId: args.template_member_id,
+          role: args.role,
+          permissionProfile: args.permission_profile,
+          name: args.name,
+          scopeTaskId: args.scope_task_id,
+          requestId: `project-agent:${sessionId}:${api.taskId}`,
+        },
+      );
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    },
+  });
+  const archiveProjectAgent = defineTool({
+    name: "archive_project_agent",
+    description: "Archive a temporary project agent after its scoped work is complete. Its history remains auditable, but it can no longer receive tasks.",
+    parameters: Type.Object({ project_id: Type.String(), member_id: Type.String() }),
+    execute: async (args, api) => {
+      const membership = (await memberships(api.conversationId)).find((item) => item.project.id === args.project_id);
+      if (!membership) throw Error(`This agent does not belong to project ${args.project_id}`);
+      const result = await projectPost(
+        `/api/projects/${encodeURIComponent(args.project_id)}/members/${encodeURIComponent(args.member_id)}/archive-temporary`,
+        { requestedByMemberId: membership.self.id },
+      );
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    },
+  });
   return defineExtension({
     name: "playground",
     tasks: jobs.tasks,
@@ -496,13 +745,23 @@ export function createPlayground(shared: SharedState, sessionId: string, spawn: 
       pingOnCall,
       subagent,
       startSession,
+      ...(collaboration.hubUrl && collaboration.deviceId
+        ? [
+            listProjectAgents,
+            listProjectMemories,
+            rememberProjectFact,
+            sendProjectMessage,
+            createProjectAgent,
+            archiveProjectAgent,
+          ]
+        : []),
       handoff,
     ],
     sections: [
       section(
         "playground",
         () =>
-          `You are a concise coding agent in the Durable Pi playground. Explain only what matters. Use only the tools you are offered; read only agents get no tools that write. Use read_state to inspect App State and update_state to create, update, delete, or increment any field. App State is shared across all agents, sessions, conversations and forks in this demo. It survives browser closure, interrupted agents, and backend restarts. Forks use the current shared object rather than a historical copy. Read before writing because other agents and humans can change it. Use only read_state and update_state for this object, never inspect or edit its database files. App State is a flexible JSON object: numbers, booleans, strings, arrays, nested objects, and null all render as live controls in the UI. Read before editing. Use list_durable_jobs and run_durable_job to run a repeatable durable job (a named workflow with checkpointed phases) when asked; pass only the inputs list_durable_jobs documents. Runs continue in the background: check them with check_durable_job, and wait only when asked. Use search_history to look back at earlier messages, tool calls or entries by number, including what came before a reset, handoff or compaction. Use ping_on_call_engineer only when asked to page someone; it works once. Use subagent only when explicitly asked to delegate. Use start_session only when asked to start a new session; it runs on its own. Never claim an action happened without using its tool. Background runs finish independently; do not wait in bash. A browser disconnect does not stop your work.`,
+          `You are a concise coding agent in the Durable Pi playground. Explain only what matters. Use only the tools you are offered; read only agents get no tools that write. Use read_state to inspect App State and update_state to create, update, delete, or increment any field. App State is shared across all agents, sessions, conversations and forks in this demo. It survives browser closure, interrupted agents, and backend restarts. Forks use the current shared object rather than a historical copy. Read before writing because other agents and humans can change it. Use only read_state and update_state for this object, never inspect or edit its database files. App State is a flexible JSON object: numbers, booleans, strings, arrays, nested objects, and null all render as live controls in the UI. Read before editing. Use list_durable_jobs and run_durable_job to run a repeatable durable job (a named workflow with checkpointed phases) when asked; pass only the inputs list_durable_jobs documents. Runs continue in the background: check them with check_durable_job, and wait only when asked. Use search_history to look back at earlier messages, tool calls or entries by number, including what came before a reset, handoff or compaction. Use ping_on_call_engineer only when asked to page someone; it works once. Use subagent only when explicitly asked to delegate. Use start_session only when asked to start a new session; it runs on its own. When project collaboration tools are available, use list_project_agents to discover agents inside your project and send_project_message to ask them for work. Use list_project_memories before updating durable facts; remember_project_fact defaults to private, and only a Coordinator may publish shared memory. A Coordinator may use create_project_agent to create a scoped temporary agent from an approved local Codex template and must use archive_project_agent after that agent finishes. Never claim an action happened without using its tool. Background runs finish independently; do not wait in bash. A browser disconnect does not stop your work.`,
         { tag: false },
       ),
     ],

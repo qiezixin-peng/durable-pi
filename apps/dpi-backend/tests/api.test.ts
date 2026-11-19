@@ -25,6 +25,17 @@ test("REST v1: auth, sessions, agents, messages, waits, idempotency, errors", as
     assert.equal(info.apiVersion, 1);
     assert.deepEqual(info.startDirs, [t.work]);
     assert.equal(info.models[0].id, "echo");
+    assert.deepEqual(info.models[0].capabilities, {
+      textInput: "supported",
+      imageInput: "unsupported",
+      toolCalling: "supported",
+      streaming: "supported",
+      structuredOutput: "unknown",
+      reasoning: "unsupported",
+      contextWindow: 128000,
+      maxOutputTokens: 8192,
+      source: "platform-verified",
+    });
     await assert.rejects(() => new DpiClient(server.base, "x".repeat(40)).device(), (e: DpiError) => e.code === "unauthorized");
 
     // Directory browsing.

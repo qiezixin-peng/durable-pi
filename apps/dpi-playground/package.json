@@ -8,10 +8,11 @@
   "scripts": {
     "dev": "tsx apps/dpi-playground-hub/src/main.ts --dev",
     "start": "tsx apps/dpi-playground-hub/src/main.ts",
-    "build": "vue-tsc --noEmit -p apps/dpi-playground-fe/tsconfig.json && tsc --noEmit -p apps/dpi-playground-hub/tsconfig.json && vite build --config apps/dpi-playground-fe/vite.config.ts",
+    "build:mcp": "esbuild apps/dpi-project-mcp/src/main.ts apps/dpi-project-mcp/src/data-main.ts --bundle --platform=node --format=esm --target=node22 --outdir=dist/mcp --entry-names=[name] --out-extension:.js=.mjs --minify",
+    "build": "npm run build:mcp && vue-tsc --noEmit -p apps/dpi-playground-fe/tsconfig.json && tsc --noEmit -p apps/dpi-playground-hub/tsconfig.json && vite build --config apps/dpi-playground-fe/vite.config.ts",
     "lint": "oxlint apps tests",
     "fmt": "oxfmt apps tests",
-    "test": "tsx --test tests/*.test.ts"
+    "test": "tsx --test --test-concurrency=1 tests/*.test.ts"
   },
   "dependencies": {
     "dompurify": "^3.2.0",
@@ -29,7 +30,11 @@
     "oxlint": "1.87.0",
     "tsx": "latest",
     "typescript": "5.9.3",
-    "vite": "8.3.2",
-    "vue-tsc": "latest"
+    "vite": "8.3.8",
+    "vue-tsc": "3.3.14"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "fsevents@2.3.3": true
   }
 }

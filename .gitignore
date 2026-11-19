@@ -3,6 +3,7 @@ dpi-network.yaml
 .env
 .env.*
 !.env.example
+*.local.env
 **/backend.env
 
 # dependencies and builds
@@ -29,4 +30,5 @@ __pycache__/
 test-results/
 tmp/
 *.log
+*.pid
 .DS_Store

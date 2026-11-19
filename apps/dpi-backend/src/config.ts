@@ -3,7 +3,7 @@
 // writes this env file through `just net up <device>`.
 import { existsSync } from "node:fs";
 import { homedir, hostname } from "node:os";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 
 export interface BackendConfig {
   name: string;
@@ -13,8 +13,12 @@ export interface BackendConfig {
   envFile: string;
   dataDir: string;
   startDirs: string[];
-  provider: "openrouter" | "faux";
+  provider: "openrouter" | "openai" | "faux";
+  authFile: string;
   token: string;
+  hubUrl?: string;
+  hubToken?: string;
+  networkDeviceId?: string;
 }
 
 const expand = (p: string) => (p === "~" ? homedir() : p.startsWith("~/") ? join(homedir(), p.slice(2)) : p);
@@ -38,11 +42,22 @@ export function loadConfig(argv = process.argv.slice(2), env = process.env): Bac
     envFile,
     dataDir: resolve(expand(flag("--data-dir", env.DPI_DATA_DIR ?? join(home, "backend")))),
     startDirs: flag("--start-dirs", env.DPI_START_DIRS ?? "~/dpi-work")
-      .split(":")
+      // PATH-like lists use ':' on Unix and ';' on Windows. Splitting on ':'
+      // corrupts Windows drive roots such as C:\\work into two bogus entries.
+      .split(delimiter)
       .filter(Boolean)
       .map((p) => resolve(expand(p))),
-    provider: (env.DPI_PROVIDER ?? "openrouter") === "faux" ? "faux" : "openrouter",
+    provider:
+      (env.DPI_PROVIDER ?? "openrouter") === "faux"
+        ? "faux"
+        : env.DPI_PROVIDER === "openai"
+          ? "openai"
+          : "openrouter",
+    authFile: resolve(expand(env.DPI_AUTH_FILE ?? join(homedir(), ".pi", "agent", "auth.json"))),
     token: env.DPI_TOKEN ?? "",
+    hubUrl: env.DPI_HUB_URL?.replace(/\/+$/, ""),
+    hubToken: env.DPI_HUB_DEVICE_TOKEN ?? env.DPI_HUB_TOKEN,
+    networkDeviceId: env.DPI_NETWORK_DEVICE_ID,
   };
   if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535)
     throw Error(`Invalid port: ${config.port}`);
