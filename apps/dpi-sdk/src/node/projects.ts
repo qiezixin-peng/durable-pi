@@ -598,6 +598,7 @@ export class ProjectRegistry {
     memberId: string,
     patch: {
       role?: string;
+      model?: string;
       permissionProfile?: ProjectPermissionProfile;
       allowModelFallback?: boolean;
       fallbackModels?: string[];
@@ -608,13 +609,18 @@ export class ProjectRegistry {
     const current = this.getMember(projectId, memberId);
     if (!current) throw Error(`Active project member not found: ${memberId}`);
     const role = patch.role === undefined ? current.role : clean(patch.role, "Member role", 80);
+    const model = patch.model === undefined
+      ? current.model
+      : clean(patch.model, "Member model", 160);
+    if (patch.model !== undefined && current.executor !== "codex")
+      throw Error("Model updates are available only for Codex members");
     const permissionProfile = patch.permissionProfile ?? current.permissionProfile;
     if (!["ROLE_DEFAULT", "READ_ONLY", "WORKSPACE_WRITE"].includes(permissionProfile))
       throw Error("Invalid project member permission profile");
     const allowModelFallback = patch.allowModelFallback ?? current.allowModelFallback;
     const fallbackModels = patch.fallbackModels === undefined
       ? current.fallbackModels
-      : modelFallbacks(patch.fallbackModels, current.model);
+      : modelFallbacks(patch.fallbackModels, model);
     if (current.executor !== "codex" && (allowModelFallback || fallbackModels.length))
       throw Error("Model fallback is available only for Codex members");
     if (allowModelFallback && !fallbackModels.length)
@@ -633,23 +639,25 @@ export class ProjectRegistry {
       throw Error("Working directory updates are available only for Codex members");
     const now = Date.now();
     const workspaceChanged = cwd !== (current.cwd ?? null);
+    const modelChanged = model !== current.model;
+    const executionIdentityChanged = workspaceChanged || modelChanged;
     return this.transaction(() => {
       this.db.prepare(
-        `UPDATE project_members SET role=?,permission_profile=?,allow_model_fallback=?,fallback_models_json=?,t3_environment_id=?,cwd=?,
+        `UPDATE project_members SET role=?,model=?,permission_profile=?,allow_model_fallback=?,fallback_models_json=?,t3_environment_id=?,cwd=?,
            codex_thread_id=CASE WHEN ? THEN NULL ELSE codex_thread_id END,
            codex_tools_version=CASE WHEN ? THEN 0 ELSE codex_tools_version END,
            codex_thread_model=CASE WHEN ? THEN NULL ELSE codex_thread_model END,
            codex_thread_runtime=CASE WHEN ? THEN 'codex-app-server' ELSE codex_thread_runtime END,
            codex_thread_provider=CASE WHEN ? THEN NULL ELSE codex_thread_provider END
          WHERE project_id=? AND id=? AND lifecycle_state!='ARCHIVED'`,
-      ).run(role, permissionProfile, allowModelFallback ? 1 : 0, JSON.stringify(fallbackModels), t3EnvironmentId, cwd,
-        workspaceChanged ? 1 : 0, workspaceChanged ? 1 : 0, workspaceChanged ? 1 : 0,
-        workspaceChanged ? 1 : 0, workspaceChanged ? 1 : 0, projectId, memberId);
+      ).run(role, model ?? null, permissionProfile, allowModelFallback ? 1 : 0, JSON.stringify(fallbackModels), t3EnvironmentId, cwd,
+        executionIdentityChanged ? 1 : 0, executionIdentityChanged ? 1 : 0, executionIdentityChanged ? 1 : 0,
+        executionIdentityChanged ? 1 : 0, executionIdentityChanged ? 1 : 0, projectId, memberId);
       this.db.prepare("UPDATE projects SET updated_at=? WHERE id=?").run(now, projectId);
       this.event(projectId, "member.permissions.updated", {
         memberId,
-        from: { role: current.role, permissionProfile: current.permissionProfile, allowModelFallback: current.allowModelFallback, fallbackModels: current.fallbackModels, t3EnvironmentId: current.t3EnvironmentId, cwd: current.cwd },
-        to: { role, permissionProfile, allowModelFallback, fallbackModels, t3EnvironmentId, cwd },
+        from: { role: current.role, model: current.model, permissionProfile: current.permissionProfile, allowModelFallback: current.allowModelFallback, fallbackModels: current.fallbackModels, t3EnvironmentId: current.t3EnvironmentId, cwd: current.cwd },
+        to: { role, model, permissionProfile, allowModelFallback, fallbackModels, t3EnvironmentId, cwd },
       }, memberId);
       if (workspaceChanged && current.threadId)
         this.event(projectId, "member.thread.detached", {
@@ -659,11 +667,27 @@ export class ProjectRegistry {
           toWorkspace: cwd,
           reason: "WORKSPACE_CHANGED",
         }, memberId);
+      if (modelChanged) {
+        this.event(projectId, "member.model.updated", {
+          memberId,
+          fromModel: current.model,
+          toModel: model,
+          detachedThreadId: current.threadId,
+        }, memberId);
+        if (current.threadId)
+          this.event(projectId, "member.thread.detached", {
+            memberId,
+            threadId: current.threadId,
+            fromModel: current.threadModel ?? current.model,
+            toModel: model,
+            reason: "MODEL_CHANGED",
+          }, memberId);
+      }
       if (allowModelFallback !== current.allowModelFallback ||
           JSON.stringify(fallbackModels) !== JSON.stringify(current.fallbackModels))
         this.event(projectId, "member.model_policy.updated", {
           memberId,
-          primaryModel: current.model,
+          primaryModel: model,
           from: { allowModelFallback: current.allowModelFallback, fallbackModels: current.fallbackModels },
           to: { allowModelFallback, fallbackModels },
         }, memberId);

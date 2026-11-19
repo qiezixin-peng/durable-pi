@@ -354,14 +354,13 @@ running background service.
 - `materialize_durable_remote_agent` verifies that the relayed target is a Git repository under the selected bound
   device root before adding a project member. The call must provide a model explicitly, and that model must occur in
   the data source's environment-bound verified-model list; it can no longer inherit the Windows Coordinator model.
-  Linux is explicitly bound to `gpt-5.6-sol`; macOS is bound to
-  `gpt-6.1-sol`. Both remote Workers completed real durable tasks and returned their results to the Windows
+  Linux and macOS are both explicitly bound to `gpt-5.6-sol`. Both remote Workers completed real durable tasks and returned their results to the Windows
   Coordinator through separate T3 Environment/Thread/Run identities.
 - `list_durable_execution_targets` gives the Coordinator a bounded view of only this project's remote source IDs,
   T3 Environment IDs, device-verified models, and the current T3 control-plane reachability snapshot without probing
   SSH or exposing physical roots. Discovery failure keeps the static targets but explicitly marks live status
-  unavailable instead of misreporting a device as offline. A real `gpt-6.2-sol` Coordinator turn verified the
-  Linux/macOS model split through this tool before remote materialization.
+  unavailable instead of misreporting a device as offline. A real `gpt-5.6-sol` Coordinator turn verified the
+  Linux/macOS model bindings through this tool before remote materialization.
 - Remote-model evidence is revalidated again at every Scheduler dispatch, before a T3 run is created or resumed.
   Primary and explicitly allowed fallback candidates are filtered against the current project/environment binding;
   revoking a model or source therefore takes effect for existing members without silently inheriting a Windows model.

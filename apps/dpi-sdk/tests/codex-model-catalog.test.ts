@@ -23,6 +23,7 @@ test("Codex model metadata is normalized without inventing unreported capabiliti
 
 test("only models with a recorded real Dynamic Tools turn are enabled by default", () => {
   const models = normalizeCodexModelList({ data: [
+    { id: "gpt-5.6-sol", inputModalities: ["text"] },
     { id: "gpt-6.2-sol", inputModalities: ["text"] },
     { id: "gpt-6.2-astra", inputModalities: ["text"] },
     { id: "gpt-6.1-terra", inputModalities: ["text"] },
@@ -30,7 +31,7 @@ test("only models with a recorded real Dynamic Tools turn are enabled by default
   assert.equal(models.find((item) => item.id === "gpt-6.2-sol")?.capabilities.dynamicTools, "supported");
   assert.equal(models.find((item) => item.id === "gpt-6.2-astra")?.capabilities.dynamicTools, "supported");
   assert.equal(models.find((item) => item.id === "gpt-6.1-terra")?.capabilities.dynamicTools, "unknown");
-  assert.equal(DEFAULT_CODEX_MODEL, "gpt-6.2-sol");
+  assert.equal(DEFAULT_CODEX_MODEL, "gpt-5.6-sol");
   assert.equal(models.find((item) => item.id === DEFAULT_CODEX_MODEL)?.capabilities.dynamicTools, "supported");
 });
 

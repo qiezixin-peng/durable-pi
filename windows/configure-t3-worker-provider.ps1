@@ -3,6 +3,10 @@ param(
   [string]$WorkerInstanceId = 'codex_durable_worker',
   [string]$CoordinatorInstanceId = 'codex_durable_coordinator',
   [string]$DefaultModel = 'gpt-5.6-sol',
+  [string]$ReasoningEffort = 'medium',
+  [string]$ServiceTier = 'fast',
+  [string]$SubagentModel = 'gpt-5.6-sol',
+  [string]$SubagentReasoningEffort = 'medium',
   [string]$WorkspaceBaseDirectory = ''
 )
 
@@ -10,6 +14,11 @@ $ErrorActionPreference = 'Stop'
 foreach ($instanceId in @($WorkerInstanceId, $CoordinatorInstanceId)) {
   if ($instanceId -notmatch '^[a-zA-Z][a-zA-Z0-9_-]{0,63}$') {
     throw 'T3 Durable Pi provider instance id is invalid.'
+  }
+}
+foreach ($value in @($DefaultModel, $ReasoningEffort, $ServiceTier, $SubagentModel, $SubagentReasoningEffort)) {
+  if ([string]::IsNullOrWhiteSpace($value) -or $value -notmatch '^[a-zA-Z0-9._-]{1,160}$') {
+    throw 'T3 Durable Pi model, reasoning and service-tier values must be simple identifiers.'
   }
 }
 
@@ -44,18 +53,24 @@ function Set-ProviderInstance([string]$InstanceId, [string]$DisplayName, [string
   return $true
 }
 
-$workerArgs = '-c features.multi_agent=false -c features.multi_agent_v2=false -c mcp_servers.anode.enabled=false -c mcp_servers.durable-pi.enabled=false -c mcp_servers.durable-pi-auto.enabled=false -c mcp_servers.rea.enabled=false -c mcp_servers.reaper.enabled=false'
+$modelArgs = "-c model_reasoning_effort=$ReasoningEffort -c service_tier=$ServiceTier -c agents.default_subagent_model=$SubagentModel -c agents.default_subagent_reasoning_effort=$SubagentReasoningEffort"
+$workerArgs = "$modelArgs -c features.multi_agent=false -c features.multi_agent_v2=false -c mcp_servers.anode.enabled=false -c mcp_servers.durable-pi.enabled=false -c mcp_servers.durable-pi-auto.enabled=false -c mcp_servers.rea.enabled=false -c mcp_servers.reaper.enabled=false"
 $coordinatorArgs = '-c features.multi_agent=false -c features.multi_agent_v2=false -c mcp_servers.anode.enabled=false -c mcp_servers.durable-pi.enabled=false -c mcp_servers.durable-pi-auto.enabled=true -c mcp_servers.durable-data.enabled=false -c mcp_servers.rea.enabled=false -c mcp_servers.reaper.enabled=false'
+$coordinatorArgs = "$modelArgs $coordinatorArgs"
 $workerChanged = Set-ProviderInstance $WorkerInstanceId 'Codex · Durable Worker' $workerArgs
 $coordinatorChanged = Set-ProviderInstance $CoordinatorInstanceId 'Codex · Durable Coordinator' $coordinatorArgs
 $existingDefault = $settings.PSObject.Properties['defaultModelSelection']
-$selection = if ($existingDefault -and $existingDefault.Value -and $existingDefault.Value.model) {
-  $existingDefault.Value
-} else {
-  [pscustomobject]@{ instanceId = $CoordinatorInstanceId; model = $DefaultModel }
+$selection = [pscustomobject][ordered]@{
+  instanceId = $CoordinatorInstanceId
+  model = $DefaultModel
+  options = @(
+    [pscustomobject]@{ id = 'reasoningEffort'; value = $ReasoningEffort },
+    [pscustomobject]@{ id = 'serviceTier'; value = $(if ($ServiceTier -eq 'fast') { 'priority' } else { $ServiceTier }) },
+    [pscustomobject]@{ id = 'cyberAccessProgram'; value = 'standard' }
+  )
 }
-$defaultChanged = [string]$selection.instanceId -ne $CoordinatorInstanceId
-$selection.instanceId = $CoordinatorInstanceId
+$existingDefaultJson = if ($existingDefault) { $existingDefault.Value | ConvertTo-Json -Depth 20 -Compress } else { '' }
+$defaultChanged = $existingDefaultJson -ne ($selection | ConvertTo-Json -Depth 20 -Compress)
 if ($existingDefault) { $settings.PSObject.Properties.Remove('defaultModelSelection') }
 $settings | Add-Member -NotePropertyName defaultModelSelection -NotePropertyValue $selection
 $workspaceChanged = $false

@@ -46,9 +46,9 @@ try {
       if (-not (Test-Path -LiteralPath $projectDb -PathType Leaf)) { throw "Live project database is missing: $projectDb" }
       Invoke-Checked 'live-database-integrity' { node 'windows\verify-sqlite.mjs' $projectDb }
       $models = Invoke-RestMethod -Uri 'http://127.0.0.1:4781/api/codex/models' -TimeoutSec 15
-      $defaultModel = @($models.data) | Where-Object { $_.id -eq 'gpt-6.2-sol' } | Select-Object -First 1
+      $defaultModel = @($models.data) | Where-Object { $_.id -eq 'gpt-5.6-sol' } | Select-Object -First 1
       if (-not $defaultModel -or $defaultModel.capabilities.dynamicTools -ne 'supported') {
-        throw 'The default gpt-6.2-sol model is unavailable or lacks platform-verified Dynamic Tools.'
+        throw 'The default gpt-5.6-sol model is unavailable or lacks platform-verified Dynamic Tools.'
       }
       $autostartTask = Get-ScheduledTask -TaskName 'DurablePi-Local-Platform' -ErrorAction SilentlyContinue
       $ensureScript = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'ensure-local.ps1'))

@@ -37,13 +37,14 @@ const strings = (value: unknown): string[] =>
  * Availability from model/list alone is deliberately not treated as capability proof.
  */
 export const DEFAULT_DYNAMIC_TOOLS_VERIFIED_MODELS = new Set([
+  "gpt-5.6-sol",
   "gpt-6.1-sol",
   "gpt-6.2-sol",
   "gpt-6.2-astra",
 ]);
 
 /** Default for new local Codex agents. Remote environments remain device-pinned. */
-export const DEFAULT_CODEX_MODEL = "gpt-6.2-sol";
+export const DEFAULT_CODEX_MODEL = "gpt-5.6-sol";
 
 export function normalizeCodexModelList(
   response: unknown,

@@ -25,6 +25,8 @@ Generated runtime credentials are preserved when setup is rerun.
 - **Scheduler and context:** concurrency, coordination-depth, context-budget and polling variables documented in
   `.env.example`.
 - **Providers:** provider instance names, Codex app-server overrides and optional OpenRouter settings.
+  `DPI_COORDINATOR_MODEL`, `DPI_CODEX_REASONING_EFFORT`, `DPI_CODEX_SERVICE_TIER`,
+  `DPI_CODEX_SUBAGENT_MODEL`, and `DPI_CODEX_SUBAGENT_REASONING_EFFORT` define the shared T3/Durable defaults.
 - **Retention:** backup, Artifact and memory expiry intervals.
 
 `DPI_DATA_ROOT_MAPPINGS_JSON` only generates routing guidance. It does not grant file access. Actual read access still

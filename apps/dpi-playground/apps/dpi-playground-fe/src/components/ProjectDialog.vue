@@ -61,7 +61,7 @@ type CodexModelOption = {
   };
 };
 const codexModels = ref<CodexModelOption[]>([]);
-const codexModel = ref("gpt-6.2-sol");
+const codexModel = ref("gpt-5.6-sol");
 const codexCwd = ref("D:\\三喜\\Agent项目");
 const addingCodex = ref(false);
 const codexTemporary = ref(true);

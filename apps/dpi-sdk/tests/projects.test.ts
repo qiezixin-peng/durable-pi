@@ -151,6 +151,15 @@ test("projects isolate members, messages and event history", async () => {
     assert.equal(threaded.threadModel, "backup-a");
     assert.equal(threaded.threadRuntime, "t3");
     assert.equal(threaded.threadProvider, "codex_worker");
+    const remodeled = registry.updateMember("alpha", fallbackMember.id, { model: "gpt-5.6-sol" });
+    assert.equal(remodeled.model, "gpt-5.6-sol");
+    assert.equal(remodeled.threadId, undefined, "a thread bound to the old model must never be resumed");
+    assert.equal(registry.events("alpha").some((event) => event.kind === "member.model.updated"), true);
+    assert.throws(
+      () => registry.updateMember("alpha", worker.id, { model: "gpt-5.6-sol" }),
+      /only for Codex/,
+    );
+    registry.setMemberThread("alpha", fallbackMember.id, "thread-after-model", 8, "gpt-5.6-sol", "t3", "codex_worker");
     const movedAfterThread = registry.updateMember("alpha", fallbackMember.id, { cwd: "/srv/music-tagger-isolated" });
     assert.equal(movedAfterThread.cwd, "/srv/music-tagger-isolated");
     assert.equal(movedAfterThread.threadId, undefined, "a thread bound to the old workspace must never be resumed");

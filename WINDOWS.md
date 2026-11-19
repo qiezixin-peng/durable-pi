@@ -212,11 +212,11 @@ $env:OPENROUTER_API_KEY = "你的密钥"
 
 若同一项目需要多个 Coder 并行写入，先在 **Managed Git worktrees** 填写主仓库根目录、标签和基准（通常为 `HEAD`）创建独立工作树，再选择 **Use for Codex** 后添加对应 Local Codex 成员。不要让两个可写 Agent 共用同一个工作目录；Scheduler 会把共享目录串行化，而独立工作树才允许真实并发。
 
-Hub 会把 `codex app-server model/list` 规范化为带缓存的本机模型目录。创建成员和每次执行前都会确认所选模型仍属于当前登录可用模型；客户端伪造或已经下线的模型会被永久拒绝而不会消耗重试次数。模型列表只证明“可用”，不会被当成工具能力证明：文字、图片和推理能力按 Codex 元数据登记，Dynamic Tools 只有经过本平台真实端到端验证的模型才标记为 `supported`。目前 `gpt-6.1-sol`、`gpt-6.2-sol` 和 `gpt-6.2-astra` 均已通过真实 Dynamic Tools 回合；新建的本机 Codex Agent 默认使用 `gpt-6.2-sol`，既有成员不会被静默迁移，Linux/macOS 远程成员继续使用各设备实测并显式选择的模型。未知能力保持 `unknown`；因此 Coordinator 只能使用已验证模型，普通 Local Codex 成员仍可使用目录中的其他模型。临时 Agent 不能取得 Coordinator 控制角色。
+Hub 会把 `codex app-server model/list` 规范化为带缓存的本机模型目录。创建成员和每次执行前都会确认所选模型仍属于当前登录可用模型；客户端伪造或已经下线的模型会被永久拒绝而不会消耗重试次数。模型列表只证明“可用”，不会被当成工具能力证明：文字、图片和推理能力按 Codex 元数据登记，Dynamic Tools 只有经过本平台真实端到端验证的模型才标记为 `supported`。目前 `gpt-5.6-sol`、`gpt-6.1-sol`、`gpt-6.2-sol` 和 `gpt-6.2-astra` 均已通过真实 Dynamic Tools 回合；新建的本机 Codex Agent 默认使用 `gpt-5.6-sol`，默认推理强度为 `medium`，服务层为 `fast`（T3 中显示为 Fast，底层响应可显示 `priority`）。既有成员只有在管理员显式运行模型迁移时才会切换。未知能力保持 `unknown`；因此 Coordinator 只能使用已验证模型，普通 Local Codex 成员仍可使用目录中的其他模型。临时 Agent 不能取得 Coordinator 控制角色。
 
-远程 Agent 不继承 Windows Coordinator 的模型。每个远程资料源把实测模型清单与自己的 T3 Environment 绑定；`materialize_durable_remote_agent` 强制显式传入模型，并在访问远端仓库前确认该模型已经在目标设备验证。当前 Linux 清单为 `gpt-5.6-sol`，macOS 清单为 `gpt-6.1-sol`，因此 Windows 的 `gpt-6.2-sol` 默认值不会被误派到不支持它的远程登录。
+远程 Agent 不盲目继承 Windows Coordinator 的模型。每个远程资料源把实测模型清单与自己的 T3 Environment 绑定；`materialize_durable_remote_agent` 强制显式传入模型，并在访问远端仓库前确认该模型已经在目标设备验证。当前 Windows、Linux 和 macOS 均已验证并统一使用 `gpt-5.6-sol`；远程派发仍会逐设备校验实测模型清单，不能因为全局默认相同就跳过能力检查。
 
-Coordinator 可先调用 `list_durable_execution_targets` 获取当前项目允许的远程 Source、T3 Environment、设备实测模型及 T3 当前链接状态；工具通过本机 T3 控制面读取 `reachable`/离线快照，不探测 SSH、不读取目标文件系统，也不暴露物理根目录。T3 状态暂时不可用时仍返回静态目标并标记 `liveStatusAvailable=false`，不会把探测故障伪装成设备离线。已用真实 `gpt-6.2-sol` T3 回合验证 Linux/macOS 两个目标及其不同模型清单。
+Coordinator 可先调用 `list_durable_execution_targets` 获取当前项目允许的远程 Source、T3 Environment、设备实测模型及 T3 当前链接状态；工具通过本机 T3 控制面读取 `reachable`/离线快照，不探测 SSH、不读取目标文件系统，也不暴露物理根目录。T3 状态暂时不可用时仍返回静态目标并标记 `liveStatusAvailable=false`，不会把探测故障伪装成设备离线。已用真实 `gpt-5.6-sol` T3 回合验证 Linux/macOS 两个目标及其设备模型清单。
 
 远程模型证据不是只在创建 Agent 时检查一次。Scheduler 每次领取远程 Codex 任务后都会重新读取目标 Environment 当前绑定及 `verifiedModels`，并要求 Agent 工作目录只能由唯一一个当前项目资料源的远端根目录拥有；Environment 相同但资料根或策略不同的来源不会被混为一台目标，匹配不出或匹配歧义都会停止派发。随后平台逐一过滤主模型与显式备用模型；已撤销或属于另一台设备的模型不会发出请求，所有候选失效时任务以不可重试的能力错误停止。自动化已验证 Linux 主模型不再获准时，只会切换到该 Linux 目标仍明确验证的备用模型。
 

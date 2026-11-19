@@ -1430,10 +1430,11 @@ app.patch(
     const memberId = String(req.params.memberId);
     const current = projects.getMember(projectId, memberId);
     if (!current) throw Object.assign(Error("Active project member not found"), { status: 404 });
+    const requestedModel = req.body?.model === undefined ? current.model ?? DEFAULT_CODEX_MODEL : String(req.body.model);
     if (current.executor === "codex" &&
-        (req.body?.role !== undefined || req.body?.allowModelFallback !== undefined || req.body?.fallbackModels !== undefined)) {
+        (req.body?.model !== undefined || req.body?.role !== undefined || req.body?.allowModelFallback !== undefined || req.body?.fallbackModels !== undefined)) {
       await validateCodexModelPolicy(
-        current.model ?? DEFAULT_CODEX_MODEL,
+        requestedModel,
         String(req.body?.role ?? current.role),
         req.body?.allowModelFallback === undefined ? current.allowModelFallback : req.body.allowModelFallback === true,
         req.body?.fallbackModels ?? current.fallbackModels,
@@ -1453,6 +1454,7 @@ app.patch(
       : undefined;
     res.json(projects.updateMember(projectId, memberId, {
       role: req.body?.role === undefined ? undefined : String(req.body.role),
+      model: req.body?.model === undefined ? undefined : requestedModel,
       permissionProfile: req.body?.permissionProfile,
       allowModelFallback: req.body?.allowModelFallback === undefined ? undefined : req.body.allowModelFallback === true,
       fallbackModels: req.body?.fallbackModels,

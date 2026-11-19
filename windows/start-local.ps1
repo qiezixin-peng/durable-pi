@@ -59,6 +59,11 @@ if ($env:DPI_T3_RUNTIME -eq '1') {
   $providerChanged = & (Join-Path $PSScriptRoot 'configure-t3-worker-provider.ps1') `
     -WorkerInstanceId $env:DPI_T3_WORKER_PROVIDER_INSTANCE `
     -CoordinatorInstanceId $env:DPI_T3_COORDINATOR_PROVIDER_INSTANCE `
+    -DefaultModel $(if ($env:DPI_COORDINATOR_MODEL) { $env:DPI_COORDINATOR_MODEL } else { 'gpt-5.6-sol' }) `
+    -ReasoningEffort $(if ($env:DPI_CODEX_REASONING_EFFORT) { $env:DPI_CODEX_REASONING_EFFORT } else { 'medium' }) `
+    -ServiceTier $(if ($env:DPI_CODEX_SERVICE_TIER) { $env:DPI_CODEX_SERVICE_TIER } else { 'fast' }) `
+    -SubagentModel $(if ($env:DPI_CODEX_SUBAGENT_MODEL) { $env:DPI_CODEX_SUBAGENT_MODEL } else { 'gpt-5.6-sol' }) `
+    -SubagentReasoningEffort $(if ($env:DPI_CODEX_SUBAGENT_REASONING_EFFORT) { $env:DPI_CODEX_SUBAGENT_REASONING_EFFORT } else { 'medium' }) `
     -WorkspaceBaseDirectory $(if ($env:DPI_T3_WORKSPACE_BASE) { $env:DPI_T3_WORKSPACE_BASE } else { $env:DPI_START_DIRS })
   if ($providerChanged -eq $true) {
     & t3 service restart | Out-Null

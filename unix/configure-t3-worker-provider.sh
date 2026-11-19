@@ -35,7 +35,22 @@ try:
 except FileNotFoundError:
     configured = set()
 disabled = [name for name in disable_candidates if name in configured]
+model = os.environ.get("DPI_COORDINATOR_MODEL", "gpt-5.6-sol")
+reasoning = os.environ.get("DPI_CODEX_REASONING_EFFORT", "medium")
+service_tier = os.environ.get("DPI_CODEX_SERVICE_TIER", "fast")
+subagent_model = os.environ.get("DPI_CODEX_SUBAGENT_MODEL", model)
+subagent_reasoning = os.environ.get("DPI_CODEX_SUBAGENT_REASONING_EFFORT", reasoning)
+for value in (model, reasoning, service_tier, subagent_model, subagent_reasoning):
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,160}", value):
+        raise SystemExit("Durable Pi model, reasoning and service-tier values must be simple identifiers")
+model_args = " ".join((
+    f"-c model_reasoning_effort={reasoning}",
+    f"-c service_tier={service_tier}",
+    f"-c agents.default_subagent_model={subagent_model}",
+    f"-c agents.default_subagent_reasoning_effort={subagent_reasoning}",
+))
 launch_args = " ".join(filter(None, [
+    model_args,
     "-c features.multi_agent=false -c features.multi_agent_v2=false",
     " ".join(f"-c mcp_servers.{name}.enabled=false" for name in disabled),
 ]))
@@ -59,11 +74,15 @@ providers["codex_durable_coordinator"] = {
         ])),
     },
 }
-selection = settings.get("defaultModelSelection")
-if not isinstance(selection, dict) or not isinstance(selection.get("model"), str) or not selection["model"].strip():
-    selection = {"model": os.environ.get("DPI_COORDINATOR_MODEL", "gpt-5.6-sol")}
-selection["instanceId"] = "codex_durable_coordinator"
-settings["defaultModelSelection"] = selection
+settings["defaultModelSelection"] = {
+    "instanceId": "codex_durable_coordinator",
+    "model": model,
+    "options": [
+        {"id": "reasoningEffort", "value": reasoning},
+        {"id": "serviceTier", "value": "priority" if service_tier == "fast" else service_tier},
+        {"id": "cyberAccessProgram", "value": "standard"},
+    ],
+}
 if workspace_base:
     workspace_base = os.path.abspath(os.path.expanduser(workspace_base))
     if not os.path.isdir(workspace_base):
