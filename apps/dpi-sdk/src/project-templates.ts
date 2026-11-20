@@ -10,13 +10,18 @@ export const DURABLE_PROJECT_TEMPLATES: readonly ProjectTemplate[] = [
   {
     id: "blank",
     name: "Blank project",
-    description: "Conservative defaults and no assumed worker team.",
+    description: "General-purpose team plan with workers activated only when the task needs them.",
     autonomyMode: "SUPERVISED",
     maxCoordinationDepth: 8,
     maxDelegatedTasksPerTurn: 12,
     maxActiveTasks: 64,
-    maxConcurrentTasks: 2,
-    suggestedRoles: [],
+    maxConcurrentTasks: 3,
+    suggestedRoles: [
+      coordinator,
+      { role: "coder", permissionProfile: "WORKSPACE_WRITE" },
+      { role: "tester", permissionProfile: "ROLE_DEFAULT" },
+      { role: "reviewer", permissionProfile: "READ_ONLY" },
+    ],
   },
   {
     id: "web",
@@ -90,7 +95,7 @@ export function durableProjectTemplate(id: string): ProjectTemplate | undefined 
   return DURABLE_PROJECT_TEMPLATES.find((template) => template.id === id);
 }
 
-/** Every project has a coordinator even when the blank template assumes no workers. */
+/** Every project has a coordinator and a frozen, pre-authorized team plan. */
 export function durableProjectTeamPlan(template: ProjectTemplate): ProjectTemplateRole[] {
   const roles = template.suggestedRoles.length ? template.suggestedRoles : [coordinator];
   return roles.map((role) => ({ ...role }));

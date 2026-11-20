@@ -95,7 +95,17 @@ const relativeDataFolder = (source: { root: string; remoteRoot?: string; remoteP
 const coordinator = (member: ProjectMember) => member.role.trim().toLowerCase() === "coordinator";
 
 const inferProjectTemplate = (cwd: string) => {
-  const has = (...parts: string[]) => existsSync(resolve(cwd, ...parts));
+  // Many real repositories keep their application markers one level below the
+  // repository root. Inspect only conventional project containers so a broad
+  // workspace (for example D:\Work) is not classified from an unrelated nested
+  // repository.
+  const conventionalRoots = [
+    [],
+    ["app"], ["client"], ["frontend"], ["web"], ["server"], ["backend"], ["api"], ["desktop"],
+    ["apps", "web"], ["apps", "desktop"], ["apps", "client"], ["apps", "server"],
+    ["packages", "web"], ["packages", "desktop"], ["packages", "client"], ["packages", "server"],
+  ];
+  const has = (...parts: string[]) => conventionalRoots.some((root) => existsSync(resolve(cwd, ...root, ...parts)));
   if (
     has("src-tauri") || has("electron-builder.yml") || has("electron-builder.yaml") ||
     has("capacitor.config.ts") || has("capacitor.config.json") || has("android") || has("ios")

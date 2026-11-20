@@ -70,6 +70,20 @@ if ($env:DPI_T3_RUNTIME -eq '1') {
     if ($LASTEXITCODE -ne 0) { throw 'T3 service restart failed after configuring the worker Provider.' }
   }
 }
+
+# Upgrade legacy projects only while they are idle. This keeps existing T3
+# workspaces usable after team-plan or device-model defaults change, without
+# rewriting a project that currently owns an active Durable task.
+$projectDefaultsReconcile = Join-Path $repoRoot 'scripts\reconcile-durable-project-defaults.mjs'
+$projectsDatabase = Join-Path $dpiRoot 'projects.sqlite'
+if ((Test-Path -LiteralPath $projectDefaultsReconcile) -and (Test-Path -LiteralPath $projectsDatabase)) {
+  $reconcileLog = Join-Path $logDir 'project-defaults-reconcile.log'
+  & node $projectDefaultsReconcile $projectsDatabase `
+    $(if ($env:DPI_COORDINATOR_MODEL) { $env:DPI_COORDINATOR_MODEL } else { 'gpt-5.6-sol' }) *>> $reconcileLog
+  if ($LASTEXITCODE -ne 0) {
+    Add-Content -LiteralPath $reconcileLog -Value 'Project-default reconciliation failed; platform startup continues without mutating busy projects.'
+  }
+}
 $env:DPI_HOME = $dpiRoot
 $env:DPI_ENV_FILE = $backendEnv
 $env:DPI_NETWORK_FILE = $networkFile

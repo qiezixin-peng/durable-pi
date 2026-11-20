@@ -616,6 +616,7 @@ test("project MCP Coordinator mode bootstraps before publishing its first tool l
     const project = registry.list().find((candidate) => candidate.name === "automatic-tool-list-project");
     assert.equal(project?.autonomyMode, "SUPERVISED");
     assert.equal(project?.templateId, "blank");
+    assert.deepEqual(project?.templatePlan.map((item) => item.role), ["coordinator", "coder", "tester", "reviewer"]);
     registry.close();
   } finally {
     server.close();
@@ -666,6 +667,27 @@ test("project MCP automatically infers safe first-use defaults from an empty ini
       params: { name: "initialize_durable_project", arguments: {} },
     });
     assert.equal((replay?.result as { structuredContent: { created: boolean } }).structuredContent.created, false);
+  } finally {
+    server.close();
+  }
+});
+
+test("project MCP recognizes application markers in conventional nested roots", async () => {
+  const { root, database } = await fixture();
+  const workspace = join(root, "nested-web-project");
+  await mkdir(join(workspace, "frontend"), { recursive: true });
+  await writeFile(join(workspace, "frontend", "package.json"), JSON.stringify({ private: true }));
+  const server = new DurableProjectMcpServer({ cwd: workspace, databasePath: database });
+  try {
+    const initialized = await server.handle({
+      jsonrpc: "2.0", id: "nested-auto-init", method: "tools/call",
+      params: { name: "initialize_durable_project", arguments: {} },
+    });
+    const project = (initialized?.result as {
+      structuredContent: { project: { templateId: string; templatePlan: Array<{ role: string }> } };
+    }).structuredContent.project;
+    assert.equal(project.templateId, "web");
+    assert.deepEqual(project.templatePlan.map((item) => item.role), ["coordinator", "architect", "coder", "tester", "reviewer"]);
   } finally {
     server.close();
   }

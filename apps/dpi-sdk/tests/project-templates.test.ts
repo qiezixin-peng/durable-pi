@@ -23,10 +23,14 @@ test("project templates have stable unique IDs and executable team plans", () =>
   }
 });
 
-test("blank keeps an uncluttered suggestion list but receives a coordinator when applied", () => {
+test("blank pre-authorizes a general team without materializing workers", () => {
   const blank = durableProjectTemplate("blank");
   assert.ok(blank);
-  assert.deepEqual(blank.suggestedRoles, []);
-  assert.deepEqual(durableProjectTeamPlan(blank), [{ role: "coordinator", permissionProfile: "READ_ONLY" }]);
+  assert.deepEqual(durableProjectTeamPlan(blank), [
+    { role: "coordinator", permissionProfile: "READ_ONLY" },
+    { role: "coder", permissionProfile: "WORKSPACE_WRITE" },
+    { role: "tester", permissionProfile: "ROLE_DEFAULT" },
+    { role: "reviewer", permissionProfile: "READ_ONLY" },
+  ]);
   assert.equal(durableProjectTemplate("missing"), undefined);
 });

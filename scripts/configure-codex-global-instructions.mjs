@@ -40,6 +40,9 @@ const managed = `${START}
 - In a Durable-managed T3 project, create or activate project workers only with the Durable project tools: use \`materialize_durable_agent\` for planned roles, \`create_durable_agent\` for temporary specialists, and \`delegate_durable_task\` for work. Do not bypass the project scheduler with native unmanaged subagent spawning.
 - The Durable task record, permission profile, lease and result are authoritative. Workers must return their result through the delegated Durable task; direct side conversations do not count as task completion.
 - Agent roles are activated only when the current task needs them. Do not start the entire project template by default.
+- For a substantive development request with two or more independent workstreams, or where implementation should be independently tested or reviewed, the Coordinator must activate or create the smallest useful worker set and delegate through Durable Pi. Trivial one-file edits, direct questions and inherently sequential work may stay with the Coordinator.
+- Before delegating, choose a role whose permission fits the work: writable implementation uses a Coder in an isolated worktree when available; research and review remain read-only; verification uses Tester. Report worker launch, completion, failure and fallback in the main T3 thread so delegated work is visible to the user.
+- If a delegated worker cannot start because its model or runtime is unavailable, do not silently continue as though delegation succeeded. Record the failure, retry only with an explicitly configured compatible model, or continue in the Coordinator while clearly stating the fallback.
 ${END}`;
 
 let existing = "";

@@ -27,9 +27,11 @@ Projects 的 Project memory 可选择 **Shared project memory** 或某个 Agent 
 
 长期事实可设置绝对 `expiresAt`。Hub 启动时及运行期间默认每分钟把到期 ACTIVE 事实事务性转为 EXPIRED，同时保存新版本和审计事件；读取与上下文装配也会即时执行到期检查，因此旧环境状态不会在定时器间隔内继续进入模型。`DPI_MEMORY_EXPIRY_INTERVAL_MS` 可在 10 秒至 24 小时范围内调整。T3 的 `remember_durable_fact` 使用 `expires_at`；相同请求重放会校验期限，不能复用幂等键延长事实有效期。Handoff 保留尚未到期事实的绝对期限，导入时已经过期的事实会跳过而不会复活。
 
-项目模板只有一份 SDK 级目录，Hub 创建项目和 T3 `initialize_durable_project` 共用同一组角色、权限与并发边界，避免两个入口随着升级产生不同计划。Blank 模板在选择界面不预设 Worker，但应用时仍会冻结一个只读 Coordinator；其余模板的建议角色会被复制成项目自己的冻结计划，后续修改模板不会改变已有项目。
+项目模板只有一份 SDK 级目录，Hub 创建项目和 T3 `initialize_durable_project` 共用同一组角色、权限与并发边界，避免两个入口随着升级产生不同计划。Blank 模板会冻结 Coordinator、Coder、Tester、Reviewer 的通用按需团队计划，但初始化时仍只创建 Coordinator；其余角色仅在真实任务需要时实例化。其他模板的建议角色同样会复制成项目自己的冻结计划，后续修改模板不会暗中改变正在工作的项目。Runtime 启动时会事务性升级空闲的旧 Blank 项目和 Codex 成员模型；存在未结束任务的项目会跳过，避免迁移与执行竞争。
 
 日常使用不再要求用户发送初始化口令。T3 的 `Codex · Durable Coordinator` 使用独立的 `durable-pi-auto` MCP 实例；未纳管目录第一次装载 Tool List 时，它会以目录名生成确定性项目身份，按根目录标识推断模板，采用 `SUPERVISED`，绑定全部已配置的只读 Windows/Linux/macOS 资料源，并只创建 Coordinator。用户在 T3 添加或打开目录后可直接描述真实任务；普通 Codex Provider 继续使用非自动的 `durable-pi`，不会因为查看任意目录而擅自登记项目。
+
+T3 中“项目”和“会话”是两层对象：同一个目录只登记为一个项目，所以再次添加相同目录会返回已有项目，这是数据去重而不是会话被锁死。需要并行讨论时应在该项目内点击 **New thread / 新会话**；每条顶层会话保持独立历史，Coordinator 派生的 Worker 会话显示在该顶层会话的关联会话区域。重新添加目录不是新建会话的入口。
 
 Windows 的日常入口固定为 T3 Code 桌面版。桌面版内置 Server 与 `t3 service install` 会争用默认的 `%USERPROFILE%\.t3`，因此默认 Home 不安装后台 T3 服务；桌面版直接读取现有项目、Provider、Thread 与远程 Environment。若以后确需无界面 T3 服务，必须分配独立 `T3CODE_HOME`，不能与桌面版共用默认 Home。
 
@@ -212,7 +214,7 @@ $env:OPENROUTER_API_KEY = "你的密钥"
 
 若同一项目需要多个 Coder 并行写入，先在 **Managed Git worktrees** 填写主仓库根目录、标签和基准（通常为 `HEAD`）创建独立工作树，再选择 **Use for Codex** 后添加对应 Local Codex 成员。不要让两个可写 Agent 共用同一个工作目录；Scheduler 会把共享目录串行化，而独立工作树才允许真实并发。
 
-Hub 会把 `codex app-server model/list` 规范化为带缓存的本机模型目录。创建成员和每次执行前都会确认所选模型仍属于当前登录可用模型；客户端伪造或已经下线的模型会被永久拒绝而不会消耗重试次数。模型列表只证明“可用”，不会被当成工具能力证明：文字、图片和推理能力按 Codex 元数据登记，Dynamic Tools 只有经过本平台真实端到端验证的模型才标记为 `supported`。目前 `gpt-5.6-sol`、`gpt-6.1-sol`、`gpt-6.2-sol` 和 `gpt-6.2-astra` 均已通过真实 Dynamic Tools 回合；新建的本机 Codex Agent 默认使用 `gpt-5.6-sol`，默认推理强度为 `medium`，服务层为 `fast`（T3 中显示为 Fast，底层响应可显示 `priority`）。既有成员只有在管理员显式运行模型迁移时才会切换。未知能力保持 `unknown`；因此 Coordinator 只能使用已验证模型，普通 Local Codex 成员仍可使用目录中的其他模型。临时 Agent 不能取得 Coordinator 控制角色。
+Hub 会把 `codex app-server model/list` 规范化为带缓存的本机模型目录。创建成员和每次执行前都会确认所选模型仍属于当前登录可用模型；客户端伪造或已经下线的模型会被永久拒绝而不会消耗重试次数。模型列表只证明“可用”，不会被当成工具能力证明：文字、图片和推理能力按 Codex 元数据登记，Dynamic Tools 只有经过本平台真实端到端验证的模型才标记为 `supported`。目前 `gpt-5.6-sol`、`gpt-6.1-sol`、`gpt-6.2-sol` 和 `gpt-6.2-astra` 均已通过真实 Dynamic Tools 回合；新建的本机 Codex Agent 默认使用 `gpt-5.6-sol`，默认推理强度为 `medium`，服务层为 `fast`（T3 中显示为 Fast，底层响应可显示 `priority`）。三端 Runtime 启动时会把空闲项目的活动 Codex 成员迁移到设备配置的 Coordinator 模型，并记录审计事件；忙碌项目等待下次安全启动再迁移。未知能力保持 `unknown`；因此 Coordinator 只能使用已验证模型，普通 Local Codex 成员仍可使用目录中的其他模型。临时 Agent 不能取得 Coordinator 控制角色。
 
 远程 Agent 不盲目继承 Windows Coordinator 的模型。每个远程资料源把实测模型清单与自己的 T3 Environment 绑定；`materialize_durable_remote_agent` 强制显式传入模型，并在访问远端仓库前确认该模型已经在目标设备验证。当前 Windows、Linux 和 macOS 均已验证并统一使用 `gpt-5.6-sol`；远程派发仍会逐设备校验实测模型清单，不能因为全局默认相同就跳过能力检查。
 

@@ -8,6 +8,7 @@ const workspace = resolve(process.argv[2] ?? process.cwd());
 const projectId = process.argv[3] ?? "durable-pi-platform";
 const coordinatorMemberId = process.argv[4] ?? "t3-coordinator";
 const coderMemberId = process.argv[5] ?? "t3-coder";
+const coordinatorModel = process.env.DPI_COORDINATOR_MODEL?.trim() || "gpt-5.6-sol";
 const requestId = `delegation-verification-${randomUUID()}`;
 const coordinationId = `t3-verification-${randomUUID()}`;
 const taskId = `t3-mcp-${createHash("sha256")
@@ -34,7 +35,7 @@ const result = await gateway.run({
   ].join("\n"),
   clientRequestId: `durable-pi-mcp-delegation-${requestId}`,
   providerInstanceId: "codex_durable_coordinator",
-  model: "gpt-6.1-sol",
+  model: coordinatorModel,
   runtimeMode: "approval-required",
   timeoutMs: 180_000,
 });

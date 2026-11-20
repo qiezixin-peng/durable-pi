@@ -8,6 +8,7 @@ const projectId = process.argv[3];
 const role = process.argv[4] ?? "coder";
 const workspaceStrategy = process.argv[5] ?? "shared";
 const expectedPermission = process.argv[6] ?? "WORKSPACE_WRITE";
+const coordinatorModel = process.env.DPI_COORDINATOR_MODEL?.trim() || "gpt-5.6-sol";
 if (!projectId)
   throw Error("Usage: verify-t3-team-materialization.ts <workspace> <durable-project-id> [role] [shared|worktree] [permission]");
 
@@ -23,7 +24,7 @@ const result = await new T3RuntimeGateway().run({
   ].join(" "),
   clientRequestId: requestId,
   providerInstanceId: "codex_durable_coordinator",
-  model: "gpt-6.1-sol",
+  model: coordinatorModel,
   runtimeMode: "approval-required",
   timeoutMs: 180_000,
 });

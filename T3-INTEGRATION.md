@@ -268,6 +268,9 @@ running background service.
   initialization, so future users do not need to remember internal source IDs.
 - Team templates no longer require manual Hub setup. A Coordinator can idempotently call
   `materialize_durable_agent` for one pre-authorized role; the role's permission cannot exceed the frozen template.
+  Blank projects pre-authorize a minimal general-purpose Coder/Tester/Reviewer plan but materialize none of them at
+  initialization. Runtime startup transactionally upgrades idle legacy Blank projects and active Codex member models;
+  projects with unfinished tasks are skipped instead of being mutated under a live lease.
   A live cross-platform project materialized one `WORKSPACE_WRITE` Coder, delegated a durable task to its separate
   `codex_durable_worker` thread, and received the result through a `codex_durable_coordinator` thread. Shared-checkout
   writes remain scheduler-serialized until a managed worktree is assigned.
