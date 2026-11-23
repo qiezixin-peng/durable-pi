@@ -1,17 +1,20 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
   [string]$WorkerInstanceId = 'codex_durable_worker',
   [string]$CoordinatorInstanceId = 'codex_durable_coordinator',
+  [string]$PiWorkerInstanceId = 'pi_durable_worker',
+  [switch]$EnablePiWorker,
   [string]$DefaultModel = 'gpt-5.6-sol',
   [string]$ReasoningEffort = 'medium',
   [string]$ServiceTier = 'fast',
   [string]$SubagentModel = 'gpt-5.6-sol',
   [string]$SubagentReasoningEffort = 'medium',
-  [string]$WorkspaceBaseDirectory = ''
+  [string]$WorkspaceBaseDirectory = '',
+  [string]$SettingsPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
-foreach ($instanceId in @($WorkerInstanceId, $CoordinatorInstanceId)) {
+foreach ($instanceId in @($WorkerInstanceId, $CoordinatorInstanceId, $PiWorkerInstanceId)) {
   if ($instanceId -notmatch '^[a-zA-Z][a-zA-Z0-9_-]{0,63}$') {
     throw 'T3 Durable Pi provider instance id is invalid.'
   }
@@ -22,7 +25,11 @@ foreach ($value in @($DefaultModel, $ReasoningEffort, $ServiceTier, $SubagentMod
   }
 }
 
-$settingsPath = Join-Path $env:USERPROFILE '.t3\userdata\settings.json'
+$settingsPath = if ([string]::IsNullOrWhiteSpace($SettingsPath)) {
+  Join-Path $env:USERPROFILE '.t3\userdata\settings.json'
+} else {
+  $SettingsPath
+}
 $settingsDir = Split-Path -Parent $settingsPath
 New-Item -ItemType Directory -Path $settingsDir -Force | Out-Null
 
@@ -37,12 +44,12 @@ if (-not $settings.providerInstances) {
   $settings | Add-Member -NotePropertyName providerInstances -NotePropertyValue ([pscustomobject]@{})
 }
 
-function Set-ProviderInstance([string]$InstanceId, [string]$DisplayName, [string]$LaunchArgs) {
+function Set-ProviderInstance([string]$InstanceId, [string]$DisplayName, [string]$LaunchArgs, [string]$Driver = 'codex') {
   $desired = [ordered]@{
-    driver = 'codex'
+    driver = $Driver
     displayName = $DisplayName
     enabled = $true
-    config = [ordered]@{ launchArgs = $LaunchArgs }
+    config = if ([string]::IsNullOrWhiteSpace($LaunchArgs)) { [ordered]@{} } else { [ordered]@{ launchArgs = $LaunchArgs } }
   }
   $existing = $settings.providerInstances.PSObject.Properties[$InstanceId]
   $desiredJson = $desired | ConvertTo-Json -Depth 20 -Compress
@@ -59,6 +66,10 @@ $coordinatorArgs = '-c features.multi_agent=false -c features.multi_agent_v2=fal
 $coordinatorArgs = "$modelArgs $coordinatorArgs"
 $workerChanged = Set-ProviderInstance $WorkerInstanceId 'Codex · Durable Worker' $workerArgs
 $coordinatorChanged = Set-ProviderInstance $CoordinatorInstanceId 'Codex · Durable Coordinator' $coordinatorArgs
+$piWorkerChanged = $false
+if ($EnablePiWorker) {
+  $piWorkerChanged = Set-ProviderInstance $PiWorkerInstanceId 'Pi · Durable Worker (DeepSeek)' '--no-mcp' 'pi'
+}
 $existingDefault = $settings.PSObject.Properties['defaultModelSelection']
 $selection = [pscustomobject][ordered]@{
   instanceId = $CoordinatorInstanceId
@@ -84,7 +95,7 @@ if (-not [string]::IsNullOrWhiteSpace($WorkspaceBaseDirectory)) {
   if ($existingWorkspace) { $settings.PSObject.Properties.Remove('addProjectBaseDirectory') }
   $settings | Add-Member -NotePropertyName addProjectBaseDirectory -NotePropertyValue $resolvedWorkspace
 }
-$changed = $workerChanged -or $coordinatorChanged -or $defaultChanged -or $workspaceChanged
+$changed = $workerChanged -or $coordinatorChanged -or $piWorkerChanged -or $defaultChanged -or $workspaceChanged
 if (-not $changed) {
   Write-Output $false
   exit 0

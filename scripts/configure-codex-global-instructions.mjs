@@ -43,6 +43,7 @@ const managed = `${START}
 - For a substantive development request with two or more independent workstreams, or where implementation should be independently tested or reviewed, the Coordinator must activate or create the smallest useful worker set and delegate through Durable Pi. Trivial one-file edits, direct questions and inherently sequential work may stay with the Coordinator.
 - Before delegating, choose a role whose permission fits the work: writable implementation uses a Coder in an isolated worktree when available; research and review remain read-only; verification uses Tester. Report worker launch, completion, failure and fallback in the main T3 thread so delegated work is visible to the user.
 - If a delegated worker cannot start because its model or runtime is unavailable, do not silently continue as though delegation succeeded. Record the failure, retry only with an explicitly configured compatible model, or continue in the Coordinator while clearly stating the fallback.
+- Local workstation models from Google Gemini (\`google/*\`, strictly via local Google Antigravity OAuth, never API keys) and DeepSeek (\`deepseek/*\`, via local DeepSeek Harness \`dsh headless --json\`) can be inspected with \`list_durable_local_models\` and selected on local \`materialize_durable_agent\` or \`create_durable_agent\` calls via \`provider\`/\`model\`. Keep the Coordinator on its configured Codex model; remote Linux/macOS targets never use Gemini and may use DeepSeek only when listed in \`list_durable_execution_targets\`.
 ${END}`;
 
 let existing = "";

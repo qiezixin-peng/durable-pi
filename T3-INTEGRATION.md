@@ -371,3 +371,17 @@ running background service.
   reachability probe, instead of issuing a serial ping before every operation. Errors remain isolated per source and
   result order stays deterministic. A live Windows/Linux/macOS filename search completed in 566 ms with both remote
   matches present and no source errors.
+- Local Windows workstations can now run **Google Gemini (`google/*`)** and **DeepSeek (`deepseek/*`)** alongside
+  Codex (`gpt-5.6-sol`) with clear billing boundaries:
+  - **Google Gemini (`google/*`)** runs strictly on the local workstation through your **Google Antigravity** desktop login
+    (`~/.gemini/antigravity`). API keys are disabled and `GEMINI_API_KEY` / `GOOGLE_API_KEY`
+    are stripped before launching `AntigravityClient` (runtime `"antigravity"`), so Gemini never falls back to per-token API billing. Read-only
+    roles enforce `--profile=research`, and all turns enforce workspace path confinement, session resumption, tool-call auditing, and
+    token usage telemetry. Remote Linux/macOS targets never use Gemini.
+  - **DeepSeek (`deepseek/*`)** runs locally through **DeepSeek Harness** (`DeepSeekHarnessClient`, runtime `"deepseek-harness"`,
+    `dsh --profile headless --json`), reusing the desktop DeepSeek Harness login (`~/.dsh/.credentials.yaml`) or `DEEPSEEK_API_KEY`,
+    with `--session-id` resumption, `--permission-mode read-only|workspace-write`, NDJSON tool auditing, and process-tree cancellation.
+    Remote Linux/macOS targets never implicitly inherit DeepSeek, but when deployed with one command via
+    `windows/setup-remote-deepseek.ps1` and listed in that target's `verifiedModels`, remote tasks can run DeepSeek
+    directly or automatically fail over from remote Codex (`gpt-5.6-sol`) when Codex quota or rate limits trip the
+    provider circuit.

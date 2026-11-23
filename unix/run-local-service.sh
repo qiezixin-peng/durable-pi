@@ -42,6 +42,15 @@ if [[ -f $repo_root/apps/dpi-playground/dist/mcp/main.mjs ]]; then
   python3 "$repo_root/unix/configure-codex-durable-mcp.py" "$repo_root" >/dev/null
 fi
 
+# Sync local Pi DeepSeek definitions when Pi and credentials are present.
+if [[ -f $repo_root/unix/configure-pi-providers.sh ]]; then
+  if [[ ${DPI_T3_PI_RUNTIME:-} == "1" || -n ${DEEPSEEK_API_KEY:-} ]]; then
+    if command -v pi >/dev/null 2>&1 || [[ -x $HOME/.pi/agent/bin/pi ]]; then
+      bash "$repo_root/unix/configure-pi-providers.sh" >/dev/null || true
+    fi
+  fi
+fi
+
 # Keep T3's folder picker focused on this machine's normal project root. This
 # is only an initial directory; it does not restrict browsing outside it.
 if [[ -x $repo_root/unix/configure-t3-worker-provider.sh ]]; then

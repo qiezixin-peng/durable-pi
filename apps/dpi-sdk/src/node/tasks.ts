@@ -372,7 +372,7 @@ export class ProjectTaskStore {
       if (result.length > max) throw Error(`${label} must be at most ${max} characters`);
       return result;
     };
-    if (!(["t3", "codex-app-server", "pi-durable"] as unknown[]).includes(binding.kind))
+    if (!(["t3", "codex-app-server", "pi-durable", "deepseek-harness", "antigravity", "pi-cli"] as unknown[]).includes(binding.kind))
       throw Error("Unknown task runtime kind");
     const incoming: ProjectTaskRuntimeBinding = {
       kind: binding.kind,
@@ -754,14 +754,14 @@ export class ProjectTaskStore {
         const member = this.db.prepare(
           "SELECT executor,cwd,t3_environment_id FROM project_members WHERE project_id=? AND id=? AND lifecycle_state!='ARCHIVED'",
         ).get(projectId, memberId) as ExecutionMemberRow | undefined;
-        if (member?.executor === "codex" && member.cwd) {
+        if ((member?.executor === "codex" || member?.executor === "pi") && member.cwd) {
           if (member.t3_environment_id) {
             const targetPath = member.cwd.replaceAll("\\", "/").replace(/\/+$/, "").toLowerCase();
             return `t3-workspace:${member.t3_environment_id}:${targetPath}`;
           }
           const absolute = resolve(member.cwd);
           const workspace = existsSync(absolute) ? realpathSync.native(absolute) : absolute;
-          return `codex-workspace:${process.platform === "win32" ? workspace.toLowerCase() : workspace}`;
+          return `workspace:${process.platform === "win32" ? workspace.toLowerCase() : workspace}`;
         }
         return `member:${memberId}`;
       };

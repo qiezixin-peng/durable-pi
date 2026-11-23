@@ -438,6 +438,41 @@ export const hub = {
       dynamicTools: "supported" | "unsupported" | "unknown";
     };
   }> }>("GET", "/codex/models"),
+  localModels: () => call<{
+    t3PiWorkerProviderInstanceId: string;
+    t3GeminiWorkerProviderInstanceId?: string;
+    roleModelMap: Record<string, string>;
+    providers: Array<{
+      provider: "google" | "deepseek";
+      runtime: "deepseek-harness" | "antigravity";
+      displayName: string;
+      authMode: "antigravity-oauth" | "deepseek-harness-account" | "api-key";
+      apiKeyForbidden: boolean;
+      runtimeInstalled: boolean;
+      envKey?: string;
+      baseUrlEnvKey?: string;
+      baseUrl?: string;
+      defaultModel: string;
+      configured: boolean;
+      authSource: "dsh-account" | "dsh-credentials" | "env" | "pi-auth" | "both" | "antigravity-cli-account" | "none";
+      remoteAllowedByDefault: false;
+      verifiedModels: string[];
+      models: Array<{
+        id: string;
+        qualifiedId: string;
+        provider: "google" | "deepseek";
+        runtime: "deepseek-harness" | "antigravity";
+        name: string;
+        icon: string;
+        verified: boolean;
+        verificationSource: "dsh-session-evidence" | "antigravity-session-evidence" | "runtime-probe" | "unverified";
+        contextWindow: number | null;
+        maxOutputTokens: number | null;
+        reasoning: "supported" | "unsupported" | "unknown";
+        inputModalities: string[];
+      }>;
+    }>;
+  }>("GET", "/local-models"),
   removeProjectMember: (id: string, memberId: string) =>
     call<{ ok: true }>(
       "DELETE",

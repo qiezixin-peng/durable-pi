@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { test } from "node:test";
 import { join } from "node:path";
 import { DpiClient } from "../../dpi-sdk/src/client.js";
@@ -2180,6 +2181,376 @@ test("worker aborts and pauses a Codex turn when its per-task token limit is rea
   } finally {
     devices.close();
     usage.close();
+    memories.close();
+    tasks.close();
+    projects.close();
+    await t.cleanup();
+  }
+});
+
+test("Local Google Antigravity workers run via AntigravityClient and local DeepSeek write/read-only workers run via DeepSeekHarnessClient (dsh headless --json) with durable execution receipts", async () => {
+  const t = await tempStore();
+  const projects = new ProjectRegistry(join(t.root, "hub", "projects.sqlite"));
+  const tasks = new ProjectTaskStore(projects.path);
+  const memories = new ProjectMemoryStore(projects.path);
+  const devices = new NetworkRegistry(join(t.root, "hub", "network.sqlite"));
+  const usage = new ProjectUsageStore(projects.path);
+  const toolCalls = new ProjectToolCallStore(projects.path);
+  const providerHealth = new ProviderHealthStore(projects.path);
+  const antigravityCalls: Array<{ modelId: string; readOnly?: boolean; cwd: string }> = [];
+  const dshCalls: Array<{
+    modelId: string;
+    permissionMode: string;
+    approvalPolicy?: string;
+    cwd: string;
+    sessionId?: string;
+  }> = [];
+  try {
+    const geminiHome = join(t.root, ".gemini");
+    execFileSync(process.execPath, [
+      "-e",
+      `require("node:fs").mkdirSync(${JSON.stringify(join(geminiHome, "antigravity-cli"))}, { recursive: true })`,
+    ]);
+    await writeFile(
+      join(geminiHome, "antigravity-cli", "acp_token.json"),
+      JSON.stringify({ refresh_token: "test-agy-cli-oauth-token" }),
+      "utf8",
+    );
+    const dshHome = join(t.root, ".dsh");
+    execFileSync(process.execPath, ["-e", `require("node:fs").mkdirSync(${JSON.stringify(dshHome)}, { recursive: true })`]);
+    await writeFile(
+      join(dshHome, ".credentials.yaml"),
+      "version: 1\nrecords:\n  - kind: deepseek-account\n    payload:\n      token: test-dsh-account-token\n      issuer: https://chat.deepseek.com\n",
+      "utf8",
+    );
+
+    projects.create({ id: "local-pi", name: "Local Antigravity & DeepSeek Harness", autonomyMode: "AUTHORIZED_AUTONOMY" });
+    projects.addMember("local-pi", {
+      id: "gemini-coder",
+      deviceId: "local-antigravity",
+      sessionId: "antigravity",
+      agentId: "gemini-coder",
+      name: "Gemini Coder",
+      role: "coder",
+      permissionProfile: "WORKSPACE_WRITE",
+      executor: "pi",
+      model: "google/gemini-4-neon",
+      cwd: t.work,
+    });
+    projects.addMember("local-pi", {
+      id: "deepseek-coder",
+      deviceId: "local-deepseek-harness",
+      sessionId: "deepseek-harness",
+      agentId: "deepseek-coder",
+      name: "DeepSeek Coder",
+      role: "coder",
+      permissionProfile: "WORKSPACE_WRITE",
+      executor: "pi",
+      model: "deepseek/deepseek-flash",
+      cwd: t.work,
+    });
+    projects.addMember("local-pi", {
+      id: "deepseek-reviewer",
+      deviceId: "local-deepseek-harness",
+      sessionId: "deepseek-harness",
+      agentId: "deepseek-reviewer",
+      name: "DeepSeek Reviewer",
+      role: "reviewer",
+      permissionProfile: "READ_ONLY",
+      executor: "pi",
+      model: "deepseek/deepseek-v4-pro",
+      cwd: t.work,
+    });
+
+    tasks.enqueue("local-pi", {
+      id: "gemini-write-task",
+      title: "Implement feature with Antigravity Gemini",
+      input: { kind: "agent.message", memberId: "gemini-coder", content: "implement feature" },
+    });
+    tasks.enqueue("local-pi", {
+      id: "deepseek-write-task",
+      title: "Fix bug with DeepSeek Harness",
+      input: { kind: "agent.message", memberId: "deepseek-coder", content: "fix bug" },
+    });
+    tasks.enqueue("local-pi", {
+      id: "deepseek-review-task",
+      title: "Review code with DeepSeek Harness",
+      input: { kind: "agent.message", memberId: "deepseek-reviewer", content: "review changes" },
+    });
+
+    const worker = new ProjectAgentTaskWorker(tasks, projects, devices, memories, {
+      workerId: "local-pi-worker",
+      usage,
+      toolCalls,
+      providerHealth,
+      useT3Runtime: true,
+      t3PiWorkerProviderInstanceId: "pi_durable_worker",
+      geminiHome,
+      dshHome,
+      localProviderEnv: {},
+      antigravityClientFactory: () => ({
+        async runTurn(input) {
+          antigravityCalls.push({
+            modelId: input.modelId,
+            readOnly: input.readOnly,
+            cwd: input.cwd,
+          });
+          return {
+            sessionId: "agy-session-1",
+            text: "ANTIGRAVITY_OAUTH_OK",
+            usage: {
+              inputTokens: 100,
+              cachedInputTokens: 10,
+              cacheWriteInputTokens: 0,
+              outputTokens: 50,
+              reasoningOutputTokens: 20,
+              totalTokens: 150,
+              costUsd: null,
+            },
+            toolEvents: [],
+          };
+        },
+      }),
+      deepSeekHarnessClientFactory: () => ({
+        async runTurn(input) {
+          dshCalls.push({
+            modelId: input.modelId,
+            permissionMode: input.permissionMode,
+            approvalPolicy: input.approvalPolicy,
+            cwd: input.cwd,
+            ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+          });
+          input.onToolEvent?.({
+            event: "started",
+            callId: "dsh-read-1",
+            toolName: "read",
+            args: { path: "README.md" },
+            writes: false,
+          });
+          input.onToolEvent?.({
+            event: "completed",
+            callId: "dsh-read-1",
+            toolName: "read",
+            result: "ok",
+            isError: false,
+            writes: false,
+          });
+          const isReadOnly = input.permissionMode === "read-only";
+          return {
+            sessionId: isReadOnly ? "session-dsh-review-1" : "session-dsh-write-1",
+            text: isReadOnly ? "DEEPSEEK_HARNESS_REVIEW_OK" : "DEEPSEEK_HARNESS_WRITE_OK",
+            authRoute: "deepseek-account",
+            usage: {
+              inputTokens: 200,
+              cachedInputTokens: 20,
+              cacheWriteInputTokens: 0,
+              outputTokens: 80,
+              reasoningOutputTokens: 30,
+              totalTokens: 300,
+            },
+            sideEffectToolObserved: false,
+          };
+        },
+      }),
+      t3RuntimeGateway: {
+        async run() {
+          throw Error("Local DeepSeek Harness and Antigravity turns must not route through T3 Pi provider");
+        },
+        async recover() {
+          throw Error("unexpected recover");
+        },
+      },
+      piLocalClientFactory: () => {
+        throw Error("PiLocalClient must not be used for DeepSeek Harness members");
+      },
+      codexClientFactory: () => {
+        throw Error("Codex app-server must not be invoked for local DeepSeek/Antigravity members");
+      },
+    });
+
+    assert.equal(await worker.runOnce("local-pi"), true);
+    assert.equal(await worker.runOnce("local-pi"), true);
+    assert.equal(await worker.runOnce("local-pi"), true);
+
+    assert.deepEqual(antigravityCalls, [{
+      modelId: "gemini-4-neon",
+      readOnly: false,
+      cwd: t.work,
+    }]);
+    assert.deepEqual(
+      [...dshCalls].sort((a, b) => a.modelId.localeCompare(b.modelId)),
+      [
+        {
+          modelId: "deepseek-flash",
+          permissionMode: "workspace-write",
+          approvalPolicy: "never",
+          cwd: t.work,
+        },
+        {
+          modelId: "deepseek-v4-pro",
+          permissionMode: "read-only",
+          approvalPolicy: "never",
+          cwd: t.work,
+        },
+      ],
+    );
+
+    const geminiTask = tasks.get("gemini-write-task")!;
+    assert.equal(geminiTask.status, "COMPLETED");
+    assert.equal((geminiTask.result as { answer?: { text?: string } }).answer?.text, "ANTIGRAVITY_OAUTH_OK");
+    assert.equal(projects.getMember("local-pi", "gemini-coder")?.threadRuntime, "antigravity");
+    assert.equal(projects.getMember("local-pi", "gemini-coder")?.threadProvider, "google");
+    assert.equal(tasks.attempts("gemini-write-task").at(-1)?.runtime?.kind, "antigravity");
+    assert.ok(tasks.executionReceipt("gemini-write-task"));
+
+    const deepseekWriteTask = tasks.get("deepseek-write-task")!;
+    assert.equal(deepseekWriteTask.status, "COMPLETED");
+    assert.equal((deepseekWriteTask.result as { answer?: { text?: string } }).answer?.text, "DEEPSEEK_HARNESS_WRITE_OK");
+    assert.equal(projects.getMember("local-pi", "deepseek-coder")?.threadRuntime, "deepseek-harness");
+    assert.equal(projects.getMember("local-pi", "deepseek-coder")?.threadProvider, "deepseek");
+    assert.equal(tasks.attempts("deepseek-write-task").at(-1)?.runtime?.kind, "deepseek-harness");
+    assert.ok(tasks.executionReceipt("deepseek-write-task"));
+
+    const deepseekTask = tasks.get("deepseek-review-task")!;
+    assert.equal(deepseekTask.status, "COMPLETED");
+    assert.equal((deepseekTask.result as { answer?: { text?: string } }).answer?.text, "DEEPSEEK_HARNESS_REVIEW_OK");
+    assert.equal(projects.getMember("local-pi", "deepseek-reviewer")?.threadRuntime, "deepseek-harness");
+    assert.equal(projects.getMember("local-pi", "deepseek-reviewer")?.threadProvider, "deepseek");
+    assert.equal(tasks.attempts("deepseek-review-task").at(-1)?.runtime?.kind, "deepseek-harness");
+    assert.ok(tasks.executionReceipt("deepseek-review-task"));
+    assert.equal(usage.summary("local-pi").totalTokens, 750);
+    assert.equal(toolCalls.list("local-pi").length > 0, true);
+  } finally {
+    providerHealth.close();
+    toolCalls.close();
+    usage.close();
+    devices.close();
+    memories.close();
+    tasks.close();
+    projects.close();
+    await t.cleanup();
+  }
+});
+
+test("Remote Linux/macOS targets can run verified DeepSeek directly and automatically fail over when remote Codex quota is exhausted", async () => {
+  const t = await tempStore();
+  const projects = new ProjectRegistry(join(t.root, "hub", "projects.sqlite"));
+  const tasks = new ProjectTaskStore(projects.path);
+  const memories = new ProjectMemoryStore(projects.path);
+  const devices = new NetworkRegistry(join(t.root, "hub", "network.sqlite"));
+  const providerHealth = new ProviderHealthStore(projects.path, 1, 60_000, 60_000);
+  const calls: Array<{ environmentId?: string; providerInstanceId?: string; model: string }> = [];
+  const verifiedRemoteModels = new Set(["gpt-5.6-sol", "deepseek/deepseek-chat"]);
+  try {
+    projects.create({ id: "remote-failover", name: "Remote Failover", autonomyMode: "AUTHORIZED_AUTONOMY" });
+    projects.addMember("remote-failover", {
+      id: "linux-coder",
+      deviceId: "linux-home",
+      sessionId: "t3-code",
+      agentId: "linux-coder",
+      name: "Linux Coder",
+      role: "coder",
+      permissionProfile: "WORKSPACE_WRITE",
+      executor: "codex",
+      model: "gpt-5.6-sol",
+      allowModelFallback: true,
+      fallbackModels: ["deepseek/deepseek-chat"],
+      cwd: "/home/user/DurablePiProjects/demo",
+      t3EnvironmentId: "env-linux-b",
+    });
+    projects.addMember("remote-failover", {
+      id: "linux-deepseek",
+      deviceId: "linux-home",
+      sessionId: "t3-code",
+      agentId: "linux-deepseek",
+      name: "Linux DeepSeek",
+      role: "coder",
+      permissionProfile: "WORKSPACE_WRITE",
+      executor: "pi",
+      model: "deepseek/deepseek-chat",
+      cwd: "/home/user/DurablePiProjects/demo-ds",
+      t3EnvironmentId: "env-linux-b",
+    });
+
+    // Simulate Codex circuit opened due to quota/rate exhaustion on remote Linux
+    providerHealth.recordFailure("codex", "gpt-5.6-sol", { code: "PROVIDER_QUOTA", message: "quota exhausted" }, 0);
+
+    tasks.enqueue("remote-failover", {
+      id: "failover-task",
+      title: "Continue remote build after Codex quota exhaustion",
+      input: { kind: "agent.message", memberId: "linux-coder", content: "run build" },
+    });
+    tasks.enqueue("remote-failover", {
+      id: "direct-remote-ds",
+      title: "Direct remote DeepSeek work",
+      input: { kind: "agent.message", memberId: "linux-deepseek", content: "run tests" },
+    });
+
+    const worker = new ProjectAgentTaskWorker(tasks, projects, devices, memories, {
+      workerId: "remote-failover-worker",
+      providerHealth,
+      useT3Runtime: true,
+      t3WorkerProviderInstanceId: "codex_durable_worker",
+      t3PiWorkerProviderInstanceId: "pi_durable_worker",
+      // Deliberately NO local Windows GEMINI/DEEPSEEK env keys: remote target owns its own credentials
+      localProviderEnv: {},
+      remoteModelVerifier: (_projectId, _member, model) =>
+        verifiedRemoteModels.has(model) ? undefined : `model ${model} is not verified on env-linux-b`,
+      t3RuntimeGateway: {
+        async run(input) {
+          calls.push({
+            environmentId: input.environmentId,
+            providerInstanceId: input.providerInstanceId,
+            model: input.model,
+          });
+          await input.onStarted?.({ threadId: `t3-${calls.length}`, runId: `run-${calls.length}`, projectId: "remote-proj" });
+          return {
+            threadId: `t3-${calls.length}`,
+            runId: `run-${calls.length}`,
+            status: "completed",
+            text: `REMOTE_OK:${input.providerInstanceId}:${input.model}`,
+            projectId: "remote-proj",
+            waitingForUser: false,
+            activity: [],
+            environmentId: input.environmentId,
+          };
+        },
+        async recover() {
+          throw Error("unexpected recover");
+        },
+      },
+      codexClientFactory: () => {
+        throw Error("direct local Codex must not run");
+      },
+      piLocalClientFactory: () => {
+        throw Error("local Windows PiLocalClient must not run for remote target");
+      },
+    });
+
+    assert.equal(await worker.runOnce("remote-failover"), true);
+    assert.equal(await worker.runOnce("remote-failover"), true);
+
+    assert.deepEqual(calls, [
+      {
+        environmentId: "env-linux-b",
+        providerInstanceId: "pi_durable_worker",
+        model: "deepseek/deepseek-chat",
+      },
+      {
+        environmentId: "env-linux-b",
+        providerInstanceId: "pi_durable_worker",
+        model: "deepseek/deepseek-chat",
+      },
+    ]);
+    assert.equal(tasks.get("failover-task")?.status, "COMPLETED");
+    assert.equal(tasks.get("direct-remote-ds")?.status, "COMPLETED");
+    assert.equal(
+      projects.events("remote-failover").some((event) => event.kind === "model.fallback.selected"),
+      true,
+    );
+  } finally {
+    providerHealth.close();
+    devices.close();
     memories.close();
     tasks.close();
     projects.close();

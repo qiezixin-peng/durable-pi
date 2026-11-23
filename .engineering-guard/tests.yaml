@@ -1,0 +1,168 @@
+schema_version: 1
+suites:
+  sdk-unit:
+    framework: command
+    command:
+      executable: node
+      args:
+        - -e
+        - 'require("node:child_process").execSync("npm run check && npm test", { stdio: "inherit" })'
+      cwd: apps/dpi-sdk
+      timeout: 5m
+      environment_allowlist:
+        - CI
+        - PATH
+        - Path
+        - SystemRoot
+        - WINDIR
+        - COMSPEC
+        - ComSpec
+        - PATHEXT
+        - APPDATA
+        - LOCALAPPDATA
+        - ProgramFiles
+        - ProgramW6432
+        - USERPROFILE
+        - HOME
+        - TEMP
+        - TMP
+        - TMPDIR
+    covers:
+      - sdk
+    level: unit
+    critical: true
+    cache:
+      enabled: true
+      cross_commit: disabled
+      hermetic: false
+    platforms:
+      - windows
+      - linux
+      - macos
+    execution: once_per_change
+    portable: true
+    canonical_platform: linux
+
+  backend-unit:
+    framework: command
+    command:
+      executable: node
+      args:
+        - -e
+        - 'require("node:child_process").execSync("npm run check && npm test", { stdio: "inherit" })'
+      cwd: apps/dpi-backend
+      timeout: 5m
+      environment_allowlist:
+        - CI
+        - PATH
+        - Path
+        - SystemRoot
+        - WINDIR
+        - COMSPEC
+        - ComSpec
+        - PATHEXT
+        - APPDATA
+        - LOCALAPPDATA
+        - ProgramFiles
+        - ProgramW6432
+        - USERPROFILE
+        - HOME
+        - TEMP
+        - TMP
+        - TMPDIR
+    covers:
+      - backend
+    level: unit
+    critical: true
+    cache:
+      enabled: true
+      cross_commit: disabled
+      hermetic: false
+    platforms:
+      - windows
+      - linux
+      - macos
+    execution: once_per_change
+    portable: true
+    canonical_platform: linux
+
+  playground-unit:
+    framework: command
+    command:
+      executable: node
+      args:
+        - -e
+        - 'require("node:child_process").execSync("npm run build && npm run lint && npm test", { stdio: "inherit" })'
+      cwd: apps/dpi-playground
+      timeout: 5m
+      environment_allowlist:
+        - CI
+        - PATH
+        - Path
+        - SystemRoot
+        - WINDIR
+        - COMSPEC
+        - ComSpec
+        - PATHEXT
+        - APPDATA
+        - LOCALAPPDATA
+        - ProgramFiles
+        - ProgramW6432
+        - USERPROFILE
+        - HOME
+        - TEMP
+        - TMP
+        - TMPDIR
+    covers:
+      - playground
+    level: unit
+    critical: true
+    cache:
+      enabled: true
+      cross_commit: disabled
+      hermetic: false
+    platforms:
+      - windows
+      - linux
+      - macos
+    execution: once_per_change
+    portable: true
+    canonical_platform: linux
+
+  ops-syntax:
+    framework: command
+    command:
+      executable: node
+      args:
+        - -e
+        - |
+          const cp = require("node:child_process");
+          const fs = require("node:fs");
+          const path = require("node:path");
+          if (process.platform === "win32") {
+            const psFiles = fs.readdirSync("windows").filter((f) => f.endsWith(".ps1")).map((f) => path.join("windows", f));
+            const cmd = psFiles.map((f) => `[void][System.Management.Automation.Language.Parser]::ParseFile('${f}', [ref]$null, [ref]$errors)`).join("; ");
+            cp.execFileSync("powershell.exe", ["-NoProfile", "-Command", `$errors = $null; ${cmd}; if ($errors.Count -gt 0) { throw ($errors | Out-String) }`], { stdio: "inherit" });
+          }
+      cwd: .
+      timeout: 2m
+      environment_allowlist:
+        - CI
+        - PATH
+        - Path
+        - SystemRoot
+    covers:
+      - ops
+    level: static
+    critical: false
+    cache:
+      enabled: true
+      cross_commit: disabled
+      hermetic: false
+    platforms:
+      - windows
+    execution: each_platform
+    portable: false
+    canonical_platform: windows
+
+regressions: []

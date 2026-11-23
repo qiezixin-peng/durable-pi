@@ -360,3 +360,27 @@ Get-Content "$env:USERPROFILE\.dpi\logs\dpi-worker-error.log" -Tail 100
 ```
 
 如果设备显示 unauthorized，重新从该 Worker 导出注册码并在 A 上执行 `add-device.ps1`；如果显示 offline，检查 Tailscale 连通性、端口和 Windows 防火墙。
+
+## 五、Windows 本地接入 Gemini（仅 Gemini Pro 订阅）与 DeepSeek Harness（`dsh`）
+
+平台默认保持 Coordinator 和常规角色使用 Codex（`gpt-5.6-sol`），同时支持在 Windows 本机接入 **Google Gemini** 和 **DeepSeek Harness**：
+
+1. **Google Gemini（直接复用桌面 Google Antigravity 登录态，不走 API Key）**：
+   - 直接复用本机已安装并登录的 **Google Antigravity**（`%LOCALAPPDATA%\Programs\antigravity\resources\bin\language_server.exe agentapi` 与 `~/.gemini/antigravity`），无需安装 `@google/gemini-cli` 或配置 API Key。
+   - 平台启动 `AntigravityClient`（Runtime 明确登记为 `antigravity`）时会主动清除 `GEMINI_API_KEY` / `GOOGLE_API_KEY` 等环境变量，确保绝不误走按量 API 计费。只读角色强制 `--profile=research`（只读无网络沙箱），并在实时解析 `transcript.jsonl` 工具调用时校验所有文件路径均严格落在项目工作目录（及受管 Git worktree 的 `.git` 公共目录）内，禁止无沙箱 Shell 工具，越界时立即通过进程树终止（`taskkill /T /F`）阻断。
+2. **DeepSeek Harness（`dsh headless --json`，复用桌面登录态或凭据库）**：
+   - 本地 DeepSeek 任务通过独立的 `DeepSeekHarnessClient`（Runtime 明确登记为 `deepseek-harness`）调用 `dsh --profile headless --json`：
+     - 自动复用桌面 **DeepSeek Harness** 登录态（`~/.dsh/.credentials.yaml` 中的 `deepseek-account` 令牌或本地凭据库），也兼容 `DEEPSEEK_API_KEY`；
+     - 支持 `--session-id <id>` 持久会话恢复；
+     - 严格映射平台权限边界：只读角色/只读模式强制 `--permission-mode read-only --approval-policy never`；可写角色强制 `--permission-mode workspace-write --approval-policy never`，仅在受管 Git worktree 下为所属仓库 `.git` 目录追加 `--add-dir`；
+     - 解析 NDJSON 事件流写入工具审计（`ProjectToolCallStore`）、Token 计量与 Durable 执行回执（Execution Receipt），取消或超时时终止完整进程树。
+3. **基于真实运行证据的模型能力发现**：
+   - 平台不硬编码虚构的模型目录或上下文参数，而是从本机 **Google Antigravity** 的真实会话数据库（`~/.gemini/antigravity/conversations/*.db`）与 **DeepSeek Harness** 的真实会话投影记录（`~/.dsh/storages/session_projcache/sessions/*.json`）中自动发现已验证模型（`verifiedModels`）与真实能力，未实测维度保持 `null` / `"unknown"`。
+4. **可选本地角色默认映射**：
+   - 如需按角色自动选模型，可在 `.env` 中设置 `DPI_ROLE_MODEL_MAP_JSON`（例如 `{"reviewer":"deepseek/deepseek-flash","researcher":"google/gemini-2.5-pro"}`），不配置则所有角色保持 Codex 默认。
+5. **远端 Linux / macOS（只配 DeepSeek 兜底，一键命令）**：
+   - 远端不启用 Gemini；平时继续用 Codex，万一以后远端 Codex 没额度，只需在 Windows 上执行一条命令为远端开启 DeepSeek 兜底：
+     ```powershell
+     .\windows\setup-remote-deepseek.ps1 -SshHost durable-linux
+     ```
+   - 然后在 `C:\Users\admin\.dpi\data-sources.json` 中把对应模型加入远端的 `verifiedModels`，即可直接派发或作为远端 Codex 额度耗尽时的自动降级备用模型。

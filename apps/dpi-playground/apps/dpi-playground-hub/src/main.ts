@@ -26,6 +26,13 @@ import { ProjectMemoryStore } from "../../../../dpi-sdk/src/node/memories.js";
 import { ProjectApprovalStore } from "../../../../dpi-sdk/src/node/approvals.js";
 import { CodexAppServerClient, type CodexAppServerOptions } from "../../../../dpi-sdk/src/node/codex-app-server.js";
 import { CodexModelCatalog, DEFAULT_CODEX_MODEL } from "../../../../dpi-sdk/src/node/codex-model-catalog.js";
+import {
+  DEFAULT_T3_PI_WORKER_PROVIDER_INSTANCE,
+  inspectLocalModelProviders,
+  isLocalPiModel,
+  isWorkspacePiMember,
+  parseModelSelection,
+} from "../../../../dpi-sdk/src/node/local-model-providers.js";
 import { SqliteBackupManager } from "../../../../dpi-sdk/src/node/backups.js";
 import { ProjectArtifactStore } from "../../../../dpi-sdk/src/node/artifacts.js";
 import { ProjectUsageStore } from "../../../../dpi-sdk/src/node/usage.js";
@@ -140,7 +147,17 @@ const validateCodexModelPolicy = async (
   if (fallbackModels.includes(primary)) throw Error("Primary model cannot also be a fallback model");
   if (allowModelFallback && !fallbackModels.length)
     throw Error("At least one fallback model is required when automatic fallback is enabled");
-  const entries = await Promise.all([primary, ...fallbackModels].map((model) => codexModels.requireAvailable(model)));
+  const normalizedFallbacks = (fallbackModels as string[]).map((candidate) => {
+    const parsed = parseModelSelection(candidate);
+    if (parsed.executor === "pi" && role.toLowerCase() === "coordinator")
+      throw Object.assign(
+        Error(`Model ${parsed.qualified} cannot be used as a Coordinator fallback`),
+        { status: 409 },
+      );
+    return parsed.executor === "pi" ? parsed.qualified : candidate;
+  });
+  const codexOnlyModels = [primary, ...normalizedFallbacks.filter((model) => !isLocalPiModel(model))];
+  const entries = await Promise.all(codexOnlyModels.map((model) => codexModels.requireAvailable(model)));
   if (role.toLowerCase() === "coordinator") {
     const unverified = entries.find((entry) => entry.capabilities.dynamicTools !== "supported");
     if (unverified)
@@ -149,7 +166,7 @@ const validateCodexModelPolicy = async (
         { status: 409 },
       );
   }
-  return fallbackModels as string[];
+  return normalizedFallbacks;
 };
 const codexWorkspace = (input: unknown, t3EnvironmentId?: string) => {
   const value = String(input ?? "").trim();
@@ -218,6 +235,8 @@ const taskWorker = new ProjectAgentTaskWorker(tasks, projects, registry, memorie
         useT3Runtime: true,
         t3RuntimeGateway: t3RuntimeGateway!,
         t3WorkerProviderInstanceId: process.env.DPI_T3_WORKER_PROVIDER_INSTANCE ?? "codex_durable_worker",
+        t3PiWorkerProviderInstanceId: process.env.DPI_T3_PI_WORKER_PROVIDER_INSTANCE ?? DEFAULT_T3_PI_WORKER_PROVIDER_INSTANCE,
+        t3GeminiWorkerProviderInstanceId: process.env.DPI_T3_GEMINI_WORKER_PROVIDER_INSTANCE?.trim() || undefined,
         t3CoordinatorProviderInstanceId: process.env.DPI_T3_COORDINATOR_PROVIDER_INSTANCE ?? "codex_durable_coordinator",
       }
     : {}),
@@ -1275,6 +1294,61 @@ app.post(
     const lifecycleFields = ["temporary", "parentMemberId", "scopeTaskId", "spawnRequestId", "lifecycleState"];
     if (lifecycleFields.some((field) => Object.prototype.hasOwnProperty.call(req.body ?? {}, field)))
       throw Error("Temporary Agent lifecycle fields require the dedicated spawn-temporary endpoint");
+    if (req.body?.executor === "pi" && (req.body?.cwd !== undefined || req.body?.provider !== undefined || isLocalPiModel(String(req.body?.model ?? "")))) {
+      const t3EnvironmentId = String(req.body?.t3EnvironmentId ?? "").trim() || undefined;
+      const cwd = codexWorkspace(req.body?.cwd, t3EnvironmentId);
+      const selection = parseModelSelection(
+        req.body?.model === undefined ? undefined : String(req.body.model),
+        req.body?.provider === undefined ? undefined : String(req.body.provider),
+      );
+      if (selection.executor !== "pi")
+        throw Error("Pi workspace members require a google/* (Gemini) or deepseek/* model");
+      if (t3EnvironmentId) {
+        if (selection.provider === "google")
+          throw Object.assign(
+            Error("Google Gemini runs strictly locally via Gemini Pro OAuth and cannot bind a remote T3 environment"),
+            { status: 400 },
+          );
+        const source = new ReadOnlyDataSourceCatalog(dataSourceCatalogPath).executionSource(
+          id,
+          t3EnvironmentId,
+          cwd,
+        );
+        if (!source.verifiedModels?.includes(selection.qualified))
+          throw Object.assign(
+            Error(`Model ${selection.qualified} is not verified for remote target ${source.id}`),
+            { status: 409 },
+          );
+      }
+      const role = String(req.body?.role ?? "worker");
+      if (role.trim().toLowerCase() === "coordinator")
+        throw Error("Coordinator role currently requires a Codex member");
+      const allowModelFallback = req.body?.allowModelFallback === true;
+      const rawFallbacks = Array.isArray(req.body?.fallbackModels) ? req.body.fallbackModels.map(String) : [];
+      const fallbackModels = rawFallbacks.map((candidate: string) => {
+        const parsed = parseModelSelection(candidate);
+        if (parsed.executor !== "pi")
+          throw Error(`Pi fallback model must be google/* or deepseek/*: ${candidate}`);
+        return parsed.qualified;
+      });
+      res.status(201).json(
+        projects.addMember(id, {
+          deviceId: t3EnvironmentId ? t3EnvironmentId : "local-pi",
+          sessionId: t3EnvironmentId ? "t3-code" : "local-pi",
+          agentId: `pi-${randomUUID()}`,
+          name: req.body?.name || `${selection.provider === "google" ? "Gemini" : "DeepSeek"} · ${selection.modelId}`,
+          role,
+          permissionProfile: req.body?.permissionProfile,
+          executor: "pi",
+          model: selection.qualified,
+          allowModelFallback,
+          fallbackModels,
+          cwd,
+          ...(t3EnvironmentId ? { t3EnvironmentId } : {}),
+        }),
+      );
+      return;
+    }
     if (req.body?.executor === "codex") {
       const t3EnvironmentId = String(req.body?.t3EnvironmentId ?? "").trim() || undefined;
       const cwd = codexWorkspace(req.body?.cwd, t3EnvironmentId);
@@ -1430,8 +1504,27 @@ app.patch(
     const memberId = String(req.params.memberId);
     const current = projects.getMember(projectId, memberId);
     if (!current) throw Object.assign(Error("Active project member not found"), { status: 404 });
-    const requestedModel = req.body?.model === undefined ? current.model ?? DEFAULT_CODEX_MODEL : String(req.body.model);
-    if (current.executor === "codex" &&
+    const workspacePi = isWorkspacePiMember(current);
+    let requestedModel = req.body?.model === undefined ? current.model ?? DEFAULT_CODEX_MODEL : String(req.body.model);
+    let requestedFallbackModels = req.body?.fallbackModels;
+    if (workspacePi) {
+      if (req.body?.model !== undefined) {
+        const parsed = parseModelSelection(requestedModel, req.body?.provider === undefined ? undefined : String(req.body.provider));
+        if (parsed.executor !== "pi")
+          throw Error("Local Pi members require a google/* (Gemini) or deepseek/* model");
+        requestedModel = parsed.qualified;
+      }
+      if (Array.isArray(req.body?.fallbackModels)) {
+        requestedFallbackModels = req.body.fallbackModels.map((candidate: unknown) => {
+          const parsed = parseModelSelection(String(candidate));
+          if (parsed.executor !== "pi")
+            throw Error(`Local Pi fallback model must be google/* or deepseek/*: ${String(candidate)}`);
+          return parsed.qualified;
+        });
+      }
+      if (req.body?.role !== undefined && String(req.body.role).trim().toLowerCase() === "coordinator")
+        throw Error("Coordinator role currently requires a Codex member");
+    } else if (current.executor === "codex" &&
         (req.body?.model !== undefined || req.body?.role !== undefined || req.body?.allowModelFallback !== undefined || req.body?.fallbackModels !== undefined)) {
       await validateCodexModelPolicy(
         requestedModel,
@@ -1448,7 +1541,7 @@ app.patch(
     const targetEnvironmentId = environmentPatch === undefined
       ? current.t3EnvironmentId
       : environmentPatch || undefined;
-    const cwd = current.executor === "codex" &&
+    const cwd = (current.executor === "codex" || workspacePi) &&
       (req.body?.cwd !== undefined || environmentPatch !== undefined)
       ? codexWorkspace(req.body?.cwd ?? current.cwd, targetEnvironmentId)
       : undefined;
@@ -1457,7 +1550,7 @@ app.patch(
       model: req.body?.model === undefined ? undefined : requestedModel,
       permissionProfile: req.body?.permissionProfile,
       allowModelFallback: req.body?.allowModelFallback === undefined ? undefined : req.body.allowModelFallback === true,
-      fallbackModels: req.body?.fallbackModels,
+      fallbackModels: requestedFallbackModels,
       t3EnvironmentId: environmentPatch,
       cwd,
     }));
@@ -1483,6 +1576,12 @@ app.get(
   "/api/codex/models",
   safe(async (_req, res) => {
     res.json({ data: await codexModels.list() });
+  }),
+);
+app.get(
+  "/api/local-models",
+  safe(async (_req, res) => {
+    res.json(inspectLocalModelProviders());
   }),
 );
 app.get("/api/provider-health", (_req, res) => res.json({ providers: providerHealth.list() }));

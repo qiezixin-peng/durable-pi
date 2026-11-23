@@ -1,0 +1,78 @@
+schema_version: 1
+project:
+  name: durable-pi
+  languages:
+    - generic
+analysis:
+  default_mode: balanced
+  auto_escalate: true
+  budgets:
+    fast:
+      max_duration: 2s
+      max_memory: 150mb
+    balanced:
+      max_duration: 5s
+      max_memory: 250mb
+    deep:
+      max_duration: 30s
+      max_memory: 1gb
+  providers:
+    builtin-module:
+      enabled: true
+    import-graph:
+      enabled: auto
+      modes:
+        - balanced
+        - deep
+        - release
+  minimum_confidence: 0.75
+risk:
+  default_level: L2
+  protected_modules: []
+  overrides:
+    database_migration: L4
+    public_api_change: L3
+cache:
+  enabled: true
+  backend: local
+  directory: .aeg/cache
+  cross_platform: false
+  exact_tree: true
+  suite_fingerprint:
+    mode: disabled
+agent_context:
+  default_view: agent-summary
+  max_failure_excerpt_bytes: 16384
+  max_auto_expansions: 3
+gates:
+  local:
+    block_on:
+      - test_failure
+      - invalid_config
+  commit:
+    block_on:
+      - test_failure
+      - invalid_config
+      - L4_unknown
+  pull-request:
+    block_on:
+      - test_failure
+      - L4_unknown
+      - invalid_config
+      - policy_relaxation
+  delivery:
+    require_clean_worktree: true
+    block_on:
+      - test_failure
+      - L4_unknown
+      - invalid_config
+      - policy_relaxation
+      - incomplete
+  release:
+    require_clean_worktree: true
+    block_on:
+      - test_failure
+      - L4_unknown
+      - invalid_config
+      - policy_relaxation
+      - incomplete

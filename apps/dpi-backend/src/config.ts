@@ -4,6 +4,7 @@
 import { existsSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { delimiter, join, resolve } from "node:path";
+import { parseBackendProviders, type BackendProviderSpec } from "./local-providers.js";
 
 export interface BackendConfig {
   name: string;
@@ -13,7 +14,7 @@ export interface BackendConfig {
   envFile: string;
   dataDir: string;
   startDirs: string[];
-  provider: "openrouter" | "openai" | "faux";
+  provider: BackendProviderSpec;
   authFile: string;
   token: string;
   hubUrl?: string;
@@ -47,12 +48,7 @@ export function loadConfig(argv = process.argv.slice(2), env = process.env): Bac
       .split(delimiter)
       .filter(Boolean)
       .map((p) => resolve(expand(p))),
-    provider:
-      (env.DPI_PROVIDER ?? "openrouter") === "faux"
-        ? "faux"
-        : env.DPI_PROVIDER === "openai"
-          ? "openai"
-          : "openrouter",
+    provider: parseBackendProviders(env.DPI_PROVIDER ?? "openrouter").join(","),
     authFile: resolve(expand(env.DPI_AUTH_FILE ?? join(homedir(), ".pi", "agent", "auth.json"))),
     token: env.DPI_TOKEN ?? "",
     hubUrl: env.DPI_HUB_URL?.replace(/\/+$/, ""),

@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { hostname } from "node:os";
+import { join } from "node:path";
 import type {
   ProjectAgentMessageTaskInput,
   ProjectAutonomyMode,
@@ -29,6 +31,28 @@ import {
   type CodexThreadOptions,
 } from "../../../../dpi-sdk/src/node/codex-app-server.js";
 import { DEFAULT_CODEX_MODEL } from "../../../../dpi-sdk/src/node/codex-model-catalog.js";
+import {
+  assertLocalProviderConfigured,
+  DEFAULT_T3_PI_WORKER_PROVIDER_INSTANCE,
+  isWorkspacePiMember,
+  parseModelSelection,
+  type LocalPiProviderId,
+} from "../../../../dpi-sdk/src/node/local-model-providers.js";
+import {
+  PiLocalClient,
+  type PiLocalClientOptions,
+  type PiLocalToolEvent,
+} from "../../../../dpi-sdk/src/node/pi-local-client.js";
+import {
+  AntigravityClient,
+  type AntigravityClientOptions,
+  type AntigravityToolEvent,
+} from "../../../../dpi-sdk/src/node/antigravity-client.js";
+import {
+  DeepSeekHarnessClient,
+  type DeepSeekHarnessClientOptions,
+  type DeepSeekHarnessToolEvent,
+} from "../../../../dpi-sdk/src/node/deepseek-harness-client.js";
 import { T3EnvironmentUnavailableError, T3RuntimeGateway } from "../../../../dpi-sdk/src/node/t3-runtime.js";
 
 const COORDINATOR_TOOLS_VERSION = 10;
@@ -410,6 +434,44 @@ const t3ToolItem = (item: Record<string, unknown>) => {
   };
 };
 
+const piLocalToolItem = (
+  event: PiLocalToolEvent | AntigravityToolEvent | DeepSeekHarnessToolEvent,
+  namespace: "pi" | "antigravity" | "deepseek-harness" = "pi",
+) => {
+  const name = event.toolName.toLowerCase();
+  const args = event.args && typeof event.args === "object" && !Array.isArray(event.args)
+    ? event.args as Record<string, unknown>
+    : undefined;
+  const status = event.event === "started" ? "in_progress" : event.isError ? "failed" : "completed";
+  if (name === "bash" || name === "powershell" || name === "run_command" || name === "run_shell_command" || name === "shell") {
+    return {
+      id: `${namespace}:${event.callId}`,
+      type: "commandExecution",
+      status,
+      command: typeof args?.command === "string" ? args.command : event.toolName,
+      aggregatedOutput: event.result === undefined ? undefined : preview(event.result),
+    };
+  }
+  if (name === "write" || name === "edit" || event.writes) {
+    return {
+      id: `${namespace}:${event.callId}`,
+      type: "fileChange",
+      status,
+      changes: [{ path: typeof args?.path === "string" ? args.path : typeof args?.file_path === "string" ? args.file_path : "unknown", kind: name }],
+    };
+  }
+  return {
+    id: `${namespace}:${event.callId}`,
+    type: "dynamicToolCall",
+    status,
+    namespace,
+    tool: event.toolName,
+    arguments: preview(event.args),
+    success: event.event === "completed" ? !event.isError : undefined,
+    result: event.result === undefined ? undefined : preview(event.result),
+  };
+};
+
 const inputOf = (lease: ProjectTaskLease): ProjectAgentMessageTaskInput => {
   const input = lease.input as Partial<ProjectAgentMessageTaskInput> | null;
   if (!input || input.kind !== "agent.message") throw new PermanentTaskError("Unsupported task input kind");
@@ -498,9 +560,22 @@ export interface ProjectAgentTaskWorkerOptions {
    * the Durable Pi coordination MCP, otherwise cwd-based identity can confuse a
    * worker with the project's Coordinator. */
   t3WorkerProviderInstanceId?: string;
+  /** Dedicated local/remote T3 Pi provider instance for DeepSeek write workers. */
+  t3PiWorkerProviderInstanceId?: string;
+  /** Optional local T3 ACP provider instance for Google Antigravity. When omitted,
+   * local Gemini runs directly via AntigravityClient with all API-key env vars stripped. */
+  t3GeminiWorkerProviderInstanceId?: string;
   /** Read-only T3 provider for Coordinator turns. It retains the Durable Pi MCP
    * but excludes unrelated local side-effect MCPs. */
   t3CoordinatorProviderInstanceId?: string;
+  piLocalClientFactory?: (options?: PiLocalClientOptions) => Pick<PiLocalClient, "runTurn">;
+  antigravityClientFactory?: (options?: AntigravityClientOptions) => Pick<AntigravityClient, "runTurn">;
+  deepSeekHarnessClientFactory?: (options?: DeepSeekHarnessClientOptions) => Pick<DeepSeekHarnessClient, "runTurn">;
+  localProviderEnv?: NodeJS.ProcessEnv;
+  localProviderAuthFile?: string;
+  geminiHome?: string;
+  dshHome?: string;
+  requireLocalProviderCredentials?: boolean;
   worktrees?: {
     list(projectId: string, inspect?: boolean): ProjectWorktree[];
     inspect?(projectId: string, id: string, checkedAt?: number): ProjectWorktree;
@@ -546,7 +621,17 @@ export class ProjectAgentTaskWorker {
   private readonly t3RuntimeGateway?: Pick<T3RuntimeGateway, "run" | "recover">;
   private readonly useT3Runtime: boolean;
   private readonly t3WorkerProviderInstanceId: string;
+  private readonly t3PiWorkerProviderInstanceId: string;
+  private readonly t3GeminiWorkerProviderInstanceId?: string;
   private readonly t3CoordinatorProviderInstanceId: string;
+  private readonly piLocalClientFactory: (options?: PiLocalClientOptions) => Pick<PiLocalClient, "runTurn">;
+  private readonly antigravityClientFactory: (options?: AntigravityClientOptions) => Pick<AntigravityClient, "runTurn">;
+  private readonly deepSeekHarnessClientFactory: (options?: DeepSeekHarnessClientOptions) => Pick<DeepSeekHarnessClient, "runTurn">;
+  private readonly localProviderEnv?: NodeJS.ProcessEnv;
+  private readonly localProviderAuthFile?: string;
+  private readonly geminiHome?: string;
+  private readonly dshHome?: string;
+  private readonly requireLocalProviderCredentials: boolean;
   private readonly worktrees?: ProjectAgentTaskWorkerOptions["worktrees"];
 
   constructor(
@@ -601,19 +686,35 @@ export class ProjectAgentTaskWorker {
     this.t3RuntimeGateway = options.t3RuntimeGateway;
     this.useT3Runtime = options.useT3Runtime === true;
     this.t3WorkerProviderInstanceId = options.t3WorkerProviderInstanceId ?? "codex_durable_worker";
+    this.t3PiWorkerProviderInstanceId = options.t3PiWorkerProviderInstanceId ?? DEFAULT_T3_PI_WORKER_PROVIDER_INSTANCE;
+    this.t3GeminiWorkerProviderInstanceId = options.t3GeminiWorkerProviderInstanceId?.trim() || undefined;
     this.t3CoordinatorProviderInstanceId = options.t3CoordinatorProviderInstanceId ?? "codex_durable_coordinator";
+    this.piLocalClientFactory = options.piLocalClientFactory ?? ((clientOptions) => new PiLocalClient(clientOptions));
+    this.antigravityClientFactory = options.antigravityClientFactory ?? ((clientOptions) => new AntigravityClient(clientOptions));
+    this.deepSeekHarnessClientFactory =
+      options.deepSeekHarnessClientFactory ?? ((clientOptions) => new DeepSeekHarnessClient(clientOptions));
+    this.localProviderEnv = options.localProviderEnv;
+    this.localProviderAuthFile = options.localProviderAuthFile;
+    this.geminiHome = options.geminiHome;
+    this.dshHome = options.dshHome;
+    this.requireLocalProviderCredentials = options.requireLocalProviderCredentials ?? true;
     this.worktrees = options.worktrees;
     if (!/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(this.t3WorkerProviderInstanceId))
       throw Error("t3WorkerProviderInstanceId must be a valid T3 provider instance id");
+    if (!/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(this.t3PiWorkerProviderInstanceId))
+      throw Error("t3PiWorkerProviderInstanceId must be a valid T3 provider instance id");
+    if (this.t3GeminiWorkerProviderInstanceId && !/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(this.t3GeminiWorkerProviderInstanceId))
+      throw Error("t3GeminiWorkerProviderInstanceId must be a valid T3 provider instance id");
     if (!/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(this.t3CoordinatorProviderInstanceId))
       throw Error("t3CoordinatorProviderInstanceId must be a valid T3 provider instance id");
     if (this.useT3Runtime && !this.t3RuntimeGateway)
       throw Error("useT3Runtime requires t3RuntimeGateway");
   }
 
-  private contextBudget(member: ProjectMember, selectedModel?: string) {
+  private contextBudget(member: ProjectMember, selectedModel?: string, selectedProvider?: string) {
     const model = selectedModel ?? member.model ?? DEFAULT_CODEX_MODEL;
-    const observed = member.executor === "codex" ? this.usage?.observedContextWindow("codex", model) : undefined;
+    const provider = selectedProvider ?? (member.executor === "codex" ? "codex" : undefined);
+    const observed = provider ? this.usage?.observedContextWindow(provider, model) : undefined;
     const maxContextTokens = Math.min(observed?.contextWindow ?? this.fallbackContextTokens, this.maxContextTokens);
     return {
       maxContextTokens,
@@ -637,9 +738,28 @@ export class ProjectAgentTaskWorker {
       ? [primary, ...member.fallbackModels]
       : [primary];
     const rejected: Array<{ model: string; reason: string }> = [];
-    let earliestCircuit: { model: string; retryAt: number } | undefined;
-    for (const model of candidates) {
+    let earliestCircuit: { provider: string; model: string; retryAt: number } | undefined;
+    for (const candidate of candidates) {
+      let parsed: ReturnType<typeof parseModelSelection>;
+      try {
+        parsed = parseModelSelection(candidate, undefined, this.localProviderEnv);
+      } catch (error) {
+        rejected.push({ model: candidate, reason: error instanceof Error ? error.message : String(error) });
+        continue;
+      }
+      const isPiFallback = parsed.executor === "pi" && (parsed.provider === "google" || parsed.provider === "deepseek");
+      const model = isPiFallback ? parsed.qualified : candidate;
+      const healthProvider = isPiFallback ? parsed.provider : "codex";
+      const healthModel = isPiFallback ? parsed.modelId : model;
+      if (isPiFallback && requiresAppDynamicTools) {
+        rejected.push({ model, reason: "Coordinator Dynamic Tools are not platform-verified" });
+        continue;
+      }
       if (member.t3EnvironmentId) {
+        if (parsed.provider === "google") {
+          rejected.push({ model, reason: "Google Gemini runs strictly locally via Gemini Pro OAuth and is not enabled on remote targets" });
+          continue;
+        }
         if (!this.remoteModelVerifier)
           throw new PermanentTaskError(`Remote model policy is unavailable for T3 environment ${member.t3EnvironmentId}`);
         let reason: string | undefined;
@@ -655,7 +775,21 @@ export class ProjectAgentTaskWorker {
           continue;
         }
       }
-      if (this.modelCatalog) {
+      if (isPiFallback) {
+        if (!member.t3EnvironmentId && this.requireLocalProviderCredentials) {
+          try {
+            assertLocalProviderConfigured(parsed.provider as LocalPiProviderId, {
+              env: this.localProviderEnv,
+              authFile: this.localProviderAuthFile,
+              geminiHome: this.geminiHome,
+              dshHome: this.dshHome,
+            });
+          } catch (error) {
+            rejected.push({ model, reason: error instanceof Error ? error.message : String(error) });
+            continue;
+          }
+        }
+      } else if (this.modelCatalog) {
         try {
           const catalogModel = await this.modelCatalog.requireAvailable(model);
           if (requiresAppDynamicTools && catalogModel.capabilities.dynamicTools !== "supported") {
@@ -668,25 +802,352 @@ export class ProjectAgentTaskWorker {
           continue;
         }
       }
-      const gate = this.providerHealth?.beforeRequest("codex", model, lease.attemptId);
+      const gate = this.providerHealth?.beforeRequest(healthProvider, healthModel, lease.attemptId);
       if (gate && !gate.allowed) {
         rejected.push({ model, reason: `provider circuit open until ${new Date(gate.retryAt).toISOString()}` });
         if (!earliestCircuit || gate.retryAt < earliestCircuit.retryAt)
-          earliestCircuit = { model, retryAt: gate.retryAt };
+          earliestCircuit = { provider: healthProvider, model: healthModel, retryAt: gate.retryAt };
         continue;
       }
       return {
+        provider: healthProvider as "codex" | LocalPiProviderId,
+        providerModelId: healthModel,
         modelId: model,
-        isFallback: model !== primary,
+        isFallback: candidate !== primary,
         rejected,
         providerGeneration: gate?.generation ?? 0,
       };
     }
     if (earliestCircuit)
-      throw new ProviderCircuitOpenError("codex", earliestCircuit.model, earliestCircuit.retryAt);
+      throw new ProviderCircuitOpenError(earliestCircuit.provider, earliestCircuit.model, earliestCircuit.retryAt);
     throw new PermanentTaskError(
       `No eligible Codex model remains${rejected.length ? `: ${rejected.map((item) => `${item.model} (${item.reason})`).join("; ")}` : ""}`,
     );
+  }
+
+  private selectLocalPiModel(
+    member: ProjectMember,
+    lease: ProjectTaskLease,
+  ): {
+    provider: LocalPiProviderId;
+    modelId: string;
+    qualified: string;
+    isFallback: boolean;
+    rejected: Array<{ model: string; reason: string }>;
+    providerGeneration: number;
+  } {
+    const primary = member.model?.trim();
+    if (!primary) throw new PermanentTaskError(`Local Pi member has no configured model: ${member.id}`);
+    const candidates = member.allowModelFallback
+      ? [primary, ...member.fallbackModels]
+      : [primary];
+    const rejected: Array<{ model: string; reason: string }> = [];
+    let earliestCircuit: { provider: LocalPiProviderId; model: string; retryAt: number } | undefined;
+    for (const candidate of candidates) {
+      let parsed: ReturnType<typeof parseModelSelection>;
+      try {
+        parsed = parseModelSelection(candidate, undefined, this.localProviderEnv);
+      } catch (error) {
+        rejected.push({ model: candidate, reason: error instanceof Error ? error.message : String(error) });
+        continue;
+      }
+      if (parsed.executor !== "pi" || (parsed.provider !== "google" && parsed.provider !== "deepseek")) {
+        rejected.push({ model: candidate, reason: "Pi worker requires a google/* or deepseek/* model" });
+        continue;
+      }
+      if (member.t3EnvironmentId) {
+        if (parsed.provider === "google") {
+          rejected.push({
+            model: parsed.qualified,
+            reason: "Google Gemini runs strictly locally via Gemini Pro OAuth and is not enabled on remote targets",
+          });
+          continue;
+        }
+        if (!this.remoteModelVerifier)
+          throw new PermanentTaskError(`Remote model policy is unavailable for T3 environment ${member.t3EnvironmentId}`);
+        let reason: string | undefined;
+        try {
+          reason = this.remoteModelVerifier(lease.projectId, member, parsed.qualified);
+        } catch (error) {
+          throw new PermanentTaskError(
+            `Remote model policy could not be evaluated: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        if (reason) {
+          rejected.push({ model: parsed.qualified, reason });
+          continue;
+        }
+      } else if (this.requireLocalProviderCredentials) {
+        try {
+          assertLocalProviderConfigured(parsed.provider, {
+            env: this.localProviderEnv,
+            authFile: this.localProviderAuthFile,
+            geminiHome: this.geminiHome,
+            dshHome: this.dshHome,
+          });
+        } catch (error) {
+          rejected.push({ model: parsed.qualified, reason: error instanceof Error ? error.message : String(error) });
+          continue;
+        }
+      }
+      const gate = this.providerHealth?.beforeRequest(parsed.provider, parsed.modelId, lease.attemptId);
+      if (gate && !gate.allowed) {
+        rejected.push({
+          model: parsed.qualified,
+          reason: `provider circuit open until ${new Date(gate.retryAt).toISOString()}`,
+        });
+        if (!earliestCircuit || gate.retryAt < earliestCircuit.retryAt)
+          earliestCircuit = { provider: parsed.provider, model: parsed.modelId, retryAt: gate.retryAt };
+        continue;
+      }
+      return {
+        provider: parsed.provider,
+        modelId: parsed.modelId,
+        qualified: parsed.qualified,
+        isFallback: candidate !== primary,
+        rejected,
+        providerGeneration: gate?.generation ?? 0,
+      };
+    }
+    if (earliestCircuit)
+      throw new ProviderCircuitOpenError(earliestCircuit.provider, earliestCircuit.model, earliestCircuit.retryAt);
+    throw new PermanentTaskError(
+      `No eligible Gemini/DeepSeek model remains${rejected.length ? `: ${rejected.map((item) => `${item.model} (${item.reason})`).join("; ")}` : ""}`,
+    );
+  }
+
+  private async runLocalAntigravityTurn(params: {
+    lease: ProjectTaskLease;
+    member: ProjectMember;
+    autonomyMode: ProjectAutonomyMode;
+    modelId: string;
+    qualifiedModel: string;
+    prompt: string;
+    timeoutMs: number;
+    signal: AbortSignal;
+    providerGeneration: number;
+  }): Promise<CodexSendResult> {
+    const { lease, member, autonomyMode, modelId, qualifiedModel, prompt, timeoutMs, signal, providerGeneration } = params;
+    const readOnly = memberRequiresReadOnly(autonomyMode, member.role, member.permissionProfile);
+    const managedWorktree = !readOnly && !member.t3EnvironmentId
+      ? this.worktrees?.list(lease.projectId, false).find((candidate) => candidate.path === member.cwd)
+      : undefined;
+    const sharedGitDir = managedWorktree ? join(managedWorktree.repositoryRoot, ".git") : undefined;
+    const additionalAllowedDirs = sharedGitDir && existsSync(sharedGitDir) ? [sharedGitDir] : undefined;
+    const existingSessionId = member.threadId && member.threadRuntime === "antigravity" &&
+        member.threadModel === qualifiedModel && member.threadProvider === "google"
+      ? member.threadId
+      : undefined;
+    const client = this.antigravityClientFactory({
+      ...(this.localProviderEnv ? { env: this.localProviderEnv } : {}),
+      ...(this.geminiHome ? { geminiHome: this.geminiHome } : {}),
+    });
+    try {
+      const result = await client.runTurn({
+        cwd: member.cwd!,
+        modelId,
+        prompt,
+        readOnly,
+        ...(additionalAllowedDirs ? { additionalAllowedDirs } : {}),
+        ...(existingSessionId ? { sessionId: existingSessionId } : {}),
+        timeoutMs,
+        signal,
+        onToolEvent: (toolEvent) => {
+          if (!this.toolCalls) return;
+          this.toolCalls.record({
+            projectId: lease.projectId,
+            taskId: lease.id,
+            attemptId: lease.attemptId,
+            fenceEpoch: lease.fenceEpoch,
+            memberId: member.id,
+            event: toolEvent.event,
+            item: piLocalToolItem(toolEvent, "antigravity"),
+            at: Date.now(),
+          });
+        },
+      });
+      const finalSessionId = result.sessionId ?? existingSessionId ?? `agy-turn:${lease.id}`;
+      this.tasks.bindRuntime(lease.id, this.workerId, lease.fenceEpoch, {
+        kind: "antigravity",
+        threadId: finalSessionId,
+        provider: "google",
+        model: qualifiedModel,
+      });
+      if (result.sessionId && (result.sessionId !== member.threadId || member.threadRuntime !== "antigravity" ||
+          member.threadModel !== qualifiedModel || member.threadProvider !== "google")) {
+        this.projects.setMemberThread(
+          lease.projectId, member.id, result.sessionId, 0, qualifiedModel, "antigravity", "google",
+        );
+      }
+      if (result.usage && this.usage) {
+        try {
+          this.usage.record({
+            projectId: lease.projectId,
+            taskId: lease.id,
+            attemptId: lease.attemptId,
+            fenceEpoch: lease.fenceEpoch,
+            memberId: member.id,
+            provider: "google",
+            model: modelId,
+            threadId: finalSessionId,
+            inputTokens: result.usage.inputTokens,
+            cachedInputTokens: result.usage.cachedInputTokens,
+            cacheWriteInputTokens: result.usage.cacheWriteInputTokens,
+            outputTokens: result.usage.outputTokens,
+            reasoningOutputTokens: result.usage.reasoningOutputTokens,
+            totalTokens: result.usage.totalTokens,
+          });
+        } catch {
+          // Usage telemetry must not fail an otherwise completed agent turn.
+        }
+      }
+      this.projects.event(lease.projectId, "antigravity.turn.completed", {
+        taskId: lease.id,
+        attemptId: lease.attemptId,
+        fenceEpoch: lease.fenceEpoch,
+        memberId: member.id,
+        sessionId: finalSessionId,
+        provider: "google",
+        model: qualifiedModel,
+        readOnly,
+        authMode: "antigravity-oauth",
+      }, member.id, member.id);
+      this.providerHealth?.recordSuccess("google", modelId, providerGeneration);
+      return {
+        status: "done",
+        submissionId: finalSessionId,
+        answer: { entryId: 0, text: result.text },
+      };
+    } catch (error) {
+      if ((error as { sideEffectToolObserved?: boolean })?.sideEffectToolObserved)
+        throw new UnknownTurnSideEffectError(
+          `agy-turn:${existingSessionId ?? lease.id}:${lease.attemptId}`,
+          `Local Antigravity turn ended after a write or shell tool started; inspect the workspace and tool audit before retrying (${error instanceof Error ? error.message : String(error)})`,
+        );
+      const recorded = errorRecord(error);
+      if (["PROVIDER_RATE_LIMIT", "PROVIDER_QUOTA", "PROVIDER_NETWORK", "MODEL_TIMEOUT"].includes(recorded.code))
+        this.providerHealth?.recordFailure("google", modelId, recorded, providerGeneration);
+      throw error;
+    }
+  }
+
+  private async runLocalDeepSeekHarnessTurn(params: {
+    lease: ProjectTaskLease;
+    member: ProjectMember;
+    autonomyMode: ProjectAutonomyMode;
+    modelId: string;
+    qualifiedModel: string;
+    prompt: string;
+    timeoutMs: number;
+    signal: AbortSignal;
+    providerGeneration: number;
+  }): Promise<CodexSendResult> {
+    const { lease, member, autonomyMode, modelId, qualifiedModel, prompt, timeoutMs, signal, providerGeneration } = params;
+    const readOnly = memberRequiresReadOnly(autonomyMode, member.role, member.permissionProfile);
+    const permissionMode = readOnly ? "read-only" as const : "workspace-write" as const;
+    const approvalPolicy = "never" as const;
+    const managedWorktree = !readOnly && !member.t3EnvironmentId
+      ? this.worktrees?.list(lease.projectId, false).find((candidate) => candidate.path === member.cwd)
+      : undefined;
+    const sharedGitDir = managedWorktree ? join(managedWorktree.repositoryRoot, ".git") : undefined;
+    const additionalWritableDirs = sharedGitDir && existsSync(sharedGitDir) ? [sharedGitDir] : undefined;
+    const existingSessionId = member.threadId && member.threadRuntime === "deepseek-harness" &&
+        member.threadModel === qualifiedModel && member.threadProvider === "deepseek"
+      ? member.threadId
+      : undefined;
+    const client = this.deepSeekHarnessClientFactory({
+      ...(this.localProviderEnv ? { env: this.localProviderEnv } : {}),
+      ...(this.dshHome ? { dshHome: this.dshHome } : {}),
+    });
+    try {
+      const result = await client.runTurn({
+        cwd: member.cwd!,
+        modelId,
+        prompt,
+        permissionMode,
+        approvalPolicy,
+        ...(additionalWritableDirs ? { additionalWritableDirs } : {}),
+        ...(existingSessionId ? { sessionId: existingSessionId } : {}),
+        timeoutMs,
+        signal,
+        onToolEvent: (toolEvent) => {
+          if (!this.toolCalls) return;
+          this.toolCalls.record({
+            projectId: lease.projectId,
+            taskId: lease.id,
+            attemptId: lease.attemptId,
+            fenceEpoch: lease.fenceEpoch,
+            memberId: member.id,
+            event: toolEvent.event,
+            item: piLocalToolItem(toolEvent, "deepseek-harness"),
+            at: Date.now(),
+          });
+        },
+      });
+      const finalSessionId = result.sessionId || existingSessionId || `dsh-turn:${lease.id}`;
+      this.tasks.bindRuntime(lease.id, this.workerId, lease.fenceEpoch, {
+        kind: "deepseek-harness",
+        threadId: finalSessionId,
+        provider: "deepseek",
+        model: qualifiedModel,
+      });
+      if (finalSessionId !== member.threadId || member.threadRuntime !== "deepseek-harness" ||
+          member.threadModel !== qualifiedModel || member.threadProvider !== "deepseek") {
+        this.projects.setMemberThread(
+          lease.projectId, member.id, finalSessionId, 0, qualifiedModel, "deepseek-harness", "deepseek",
+        );
+      }
+      if (result.usage && this.usage) {
+        try {
+          this.usage.record({
+            projectId: lease.projectId,
+            taskId: lease.id,
+            attemptId: lease.attemptId,
+            fenceEpoch: lease.fenceEpoch,
+            memberId: member.id,
+            provider: "deepseek",
+            model: modelId,
+            threadId: finalSessionId,
+            inputTokens: result.usage.inputTokens,
+            cachedInputTokens: result.usage.cachedInputTokens,
+            cacheWriteInputTokens: result.usage.cacheWriteInputTokens,
+            outputTokens: result.usage.outputTokens,
+            reasoningOutputTokens: result.usage.reasoningOutputTokens,
+            totalTokens: result.usage.totalTokens,
+          });
+        } catch {
+          // Usage telemetry must not fail an otherwise completed agent turn.
+        }
+      }
+      this.projects.event(lease.projectId, "deepseek.harness.turn.completed", {
+        taskId: lease.id,
+        attemptId: lease.attemptId,
+        fenceEpoch: lease.fenceEpoch,
+        memberId: member.id,
+        sessionId: finalSessionId,
+        provider: "deepseek",
+        model: qualifiedModel,
+        permissionMode,
+        approvalPolicy,
+        authRoute: result.authRoute,
+      }, member.id, member.id);
+      this.providerHealth?.recordSuccess("deepseek", modelId, providerGeneration);
+      return {
+        status: "done",
+        submissionId: finalSessionId,
+        answer: { entryId: 0, text: result.text },
+      };
+    } catch (error) {
+      if ((error as { sideEffectToolObserved?: boolean })?.sideEffectToolObserved)
+        throw new UnknownTurnSideEffectError(
+          `dsh-turn:${existingSessionId ?? lease.id}:${lease.attemptId}`,
+          `Local DeepSeek Harness turn ended after a write or shell tool started; inspect the workspace and tool audit before retrying (${error instanceof Error ? error.message : String(error)})`,
+        );
+      const recorded = errorRecord(error);
+      if (["PROVIDER_RATE_LIMIT", "PROVIDER_QUOTA", "PROVIDER_NETWORK", "MODEL_TIMEOUT"].includes(recorded.code))
+        this.providerHealth?.recordFailure("deepseek", modelId, recorded, providerGeneration);
+      throw error;
+    }
   }
 
   private context(projectId: string, memberId: string, task: string, budget: ReturnType<ProjectAgentTaskWorker["contextBudget"]>) {
@@ -1209,17 +1670,23 @@ export class ProjectAgentTaskWorker {
         `- You may create at most ${maxPerTurn} new delegated tasks in this turn.\n` +
         `- Delegate only work that is still required. When the requested acceptance criteria are satisfied, summarize the result and stop creating tasks.`;
     }
+    const workspacePi = isWorkspacePiMember(member);
     const plannedT3RuntimeMode = member.executor === "codex"
       ? (isCoordinator
           ? "approval-required" as const
           : t3RuntimeModeFor(project.autonomyMode, member.role, member.permissionProfile))
-      : undefined;
+      : workspacePi
+        ? (isCoordinator
+            ? undefined
+            : t3RuntimeModeFor(project.autonomyMode, member.role, member.permissionProfile))
+        : undefined;
     const plannedT3Runtime = this.useT3Runtime && plannedT3RuntimeMode !== undefined;
     const codexSelection = member.executor === "codex"
       // T3 supplies Coordinator tools through the configured MCP provider. Its
       // model does not need the app-server-only Dynamic Tools capability gate.
       ? await this.selectCodexModel(member, lease, isCoordinator && !plannedT3Runtime)
       : undefined;
+    const piSelection = workspacePi ? this.selectLocalPiModel(member, lease) : undefined;
     if (codexSelection?.isFallback)
       this.projects.event(lease.projectId, "model.fallback.selected", {
         taskId: lease.id,
@@ -1229,7 +1696,20 @@ export class ProjectAgentTaskWorker {
         selectedModel: codexSelection.modelId,
         rejected: codexSelection.rejected,
       }, member.id, member.id);
-    const contextBudget = this.contextBudget(member, codexSelection?.modelId);
+    if (piSelection?.isFallback)
+      this.projects.event(lease.projectId, "model.fallback.selected", {
+        taskId: lease.id,
+        attemptId: lease.attemptId,
+        memberId: member.id,
+        primaryModel: member.model,
+        selectedModel: piSelection.qualified,
+        rejected: piSelection.rejected,
+      }, member.id, member.id);
+    const contextBudget = this.contextBudget(
+      member,
+      codexSelection?.modelId ?? piSelection?.modelId,
+      codexSelection ? "codex" : piSelection?.provider,
+    );
     const context = this.context(lease.projectId, member.id, taskText, contextBudget);
     this.projects.event(
       lease.projectId,
@@ -1254,18 +1734,25 @@ export class ProjectAgentTaskWorker {
         member.permissionProfile,
       );
       const modelId = codexSelection!.modelId;
+      const healthProvider = codexSelection!.provider;
+      const healthModelId = codexSelection!.providerModelId;
       const providerGeneration = codexSelection!.providerGeneration;
       const requiredToolsVersion = isCoordinator ? COORDINATOR_TOOLS_VERSION : 0;
       const t3RuntimeMode = plannedT3RuntimeMode;
-      const t3ProviderInstanceId = isCoordinator
-        ? this.t3CoordinatorProviderInstanceId
-        : this.t3WorkerProviderInstanceId;
-      const t3Eligible = this.useT3Runtime && t3RuntimeMode !== undefined;
+      const t3ProviderInstanceId = healthProvider === "google"
+        ? this.t3GeminiWorkerProviderInstanceId
+        : healthProvider === "deepseek"
+          ? (member.t3EnvironmentId ? this.t3PiWorkerProviderInstanceId : undefined)
+          : (isCoordinator
+              ? this.t3CoordinatorProviderInstanceId
+              : this.t3WorkerProviderInstanceId);
+      const t3Eligible = this.useT3Runtime && t3RuntimeMode !== undefined && Boolean(t3ProviderInstanceId);
       if (member.t3EnvironmentId && !t3Eligible)
         throw new PermanentTaskError(
           `Codex member ${member.id} is bound to T3 environment ${member.t3EnvironmentId}, but this task is not eligible for the enabled T3 runtime policy`,
         );
       if (t3Eligible) {
+        const resolvedT3Provider = t3ProviderInstanceId!;
         try {
           const recoverable = this.tasks.attempts(lease.id)
             .filter((attempt) => attempt.id !== lease.attemptId && ["EXPIRED", "WAITING_USER", "WAITING_DEVICE"].includes(attempt.status) &&
@@ -1273,25 +1760,25 @@ export class ProjectAgentTaskWorker {
             .at(-1);
           const bind = (threadId: string, runId: string) => {
             this.tasks.bindRuntime(lease.id, this.workerId, lease.fenceEpoch, {
-              kind: "t3", threadId, runId, provider: t3ProviderInstanceId, model: modelId,
+              kind: "t3", threadId, runId, provider: resolvedT3Provider, model: modelId,
               ...(member.t3EnvironmentId ? { environmentId: member.t3EnvironmentId } : {}),
             });
             const current = this.projects.getMember(lease.projectId, member.id);
             if (threadId !== current?.threadId || current.threadRuntime !== "t3" || current.threadModel !== modelId ||
-                current.threadProvider !== t3ProviderInstanceId)
+                current.threadProvider !== resolvedT3Provider)
               this.projects.setMemberThread(
-                lease.projectId, member.id, threadId, 0, modelId, "t3", t3ProviderInstanceId,
+                lease.projectId, member.id, threadId, 0, modelId, "t3", resolvedT3Provider,
               );
           };
           let result: Awaited<ReturnType<T3RuntimeGateway["run"]>>;
           if (recoverable?.runtime?.runId) {
             const recoveredEnvironment = recoverable.runtime.environmentId ?? null;
             const expectedEnvironment = member.t3EnvironmentId ?? null;
-            if (recoverable.runtime.model !== modelId || recoverable.runtime.provider !== t3ProviderInstanceId ||
+            if (recoverable.runtime.model !== modelId || recoverable.runtime.provider !== resolvedT3Provider ||
                 recoveredEnvironment !== expectedEnvironment)
               throw new UnknownTurnSideEffectError(
                 recoverable.runtime.runId,
-                `An expired T3 run cannot be resumed under changed execution identity: expected provider=${t3ProviderInstanceId}, model=${modelId}, environment=${expectedEnvironment ?? "local"}; recorded provider=${recoverable.runtime.provider}, model=${recoverable.runtime.model}, environment=${recoveredEnvironment ?? "local"}`,
+                `An expired T3 run cannot be resumed under changed execution identity: expected provider=${resolvedT3Provider}, model=${modelId}, environment=${expectedEnvironment ?? "local"}; recorded provider=${recoverable.runtime.provider}, model=${recoverable.runtime.model}, environment=${recoveredEnvironment ?? "local"}`,
               );
             bind(recoverable.runtime.threadId, recoverable.runtime.runId);
             result = await this.t3RuntimeGateway!.recover({
@@ -1321,13 +1808,13 @@ export class ProjectAgentTaskWorker {
                 title: `${member.name}: ${lease.title}`.slice(0, 240),
                 message: context.text,
                 clientRequestId: requestId(lease.id),
-                model: modelId,
-                providerInstanceId: t3ProviderInstanceId,
+                model: healthProvider === "google" ? healthModelId : modelId,
+                providerInstanceId: resolvedT3Provider,
                 runtimeMode: t3RuntimeMode!,
                 interactionMode: "default",
                 environmentId: member.t3EnvironmentId,
                 ...(member.threadId && member.threadRuntime === "t3" && member.threadModel === modelId &&
-                    member.threadProvider === t3ProviderInstanceId
+                    member.threadProvider === resolvedT3Provider
                   ? { existingThreadId: member.threadId }
                   : {}),
                 timeoutMs: input.waitMs ?? 300_000,
@@ -1370,7 +1857,7 @@ export class ProjectAgentTaskWorker {
             environmentId: member.t3EnvironmentId ?? null,
             ...(recoverable ? { recoveredAttemptId: recoverable.id, recoveredAttemptStatus: recoverable.status } : {}),
           }, member.id, member.id);
-          this.providerHealth?.recordSuccess("codex", modelId, providerGeneration);
+          this.providerHealth?.recordSuccess(healthProvider, healthModelId, providerGeneration);
           return {
             status: "done",
             submissionId: result.runId,
@@ -1380,10 +1867,36 @@ export class ProjectAgentTaskWorker {
           if (error instanceof T3EnvironmentUnavailableError)
             throw new DeviceUnavailableError(error.environmentId, error.environmentStatus, error.message);
           const recorded = errorRecord(error);
-          if (["PROVIDER_RATE_LIMIT", "PROVIDER_NETWORK", "MODEL_TIMEOUT"].includes(recorded.code))
-            this.providerHealth?.recordFailure("codex", modelId, recorded, providerGeneration);
+          if (["PROVIDER_RATE_LIMIT", "PROVIDER_QUOTA", "PROVIDER_NETWORK", "MODEL_TIMEOUT"].includes(recorded.code))
+            this.providerHealth?.recordFailure(healthProvider, healthModelId, recorded, providerGeneration);
           throw error;
         }
+      }
+      if (healthProvider === "google") {
+        return this.runLocalAntigravityTurn({
+          lease,
+          member,
+          autonomyMode: project.autonomyMode,
+          modelId: healthModelId,
+          qualifiedModel: modelId,
+          prompt: context.text,
+          timeoutMs: input.waitMs ?? 300_000,
+          signal,
+          providerGeneration,
+        });
+      }
+      if (healthProvider === "deepseek") {
+        return this.runLocalDeepSeekHarnessTurn({
+          lease,
+          member,
+          autonomyMode: project.autonomyMode,
+          modelId: healthModelId,
+          qualifiedModel: modelId,
+          prompt: context.text,
+          timeoutMs: input.waitMs ?? 300_000,
+          signal,
+          providerGeneration,
+        });
       }
       const client = this.codexClientFactory({
         experimentalApi: isCoordinator,
@@ -1528,6 +2041,170 @@ export class ProjectAgentTaskWorker {
       } finally {
         await client.close();
       }
+    }
+    if (workspacePi) {
+      if (!member.cwd) throw new PermanentTaskError(`Local Pi member has no working directory: ${member.id}`);
+      const selected = piSelection!;
+      const t3RuntimeMode = plannedT3RuntimeMode;
+      const t3ProviderInstanceId = selected.provider === "google"
+        ? this.t3GeminiWorkerProviderInstanceId
+        : (member.t3EnvironmentId ? this.t3PiWorkerProviderInstanceId : undefined);
+      const t3Eligible = this.useT3Runtime && t3RuntimeMode !== undefined && Boolean(t3ProviderInstanceId);
+      if (member.t3EnvironmentId && !t3Eligible)
+        throw new PermanentTaskError(
+          `Remote Pi member ${member.id} is bound to T3 environment ${member.t3EnvironmentId}, but this task is not eligible for the enabled T3 runtime policy`,
+        );
+      if (t3Eligible) {
+        const activeT3ProviderInstanceId = t3ProviderInstanceId!;
+        try {
+          const recoverable = this.tasks.attempts(lease.id)
+            .filter((attempt) => attempt.id !== lease.attemptId && ["EXPIRED", "WAITING_USER", "WAITING_DEVICE"].includes(attempt.status) &&
+              attempt.runtime?.kind === "t3" && attempt.runtime.runId)
+            .at(-1);
+          const bind = (threadId: string, runId: string) => {
+            this.tasks.bindRuntime(lease.id, this.workerId, lease.fenceEpoch, {
+              kind: "t3",
+              threadId,
+              runId,
+              provider: activeT3ProviderInstanceId,
+              model: selected.qualified,
+              ...(member.t3EnvironmentId ? { environmentId: member.t3EnvironmentId } : {}),
+            });
+            const current = this.projects.getMember(lease.projectId, member.id);
+            if (threadId !== current?.threadId || current.threadRuntime !== "t3" ||
+                current.threadModel !== selected.qualified || current.threadProvider !== activeT3ProviderInstanceId)
+              this.projects.setMemberThread(
+                lease.projectId, member.id, threadId, 0, selected.qualified, "t3", activeT3ProviderInstanceId,
+              );
+          };
+          let result: Awaited<ReturnType<T3RuntimeGateway["run"]>>;
+          if (recoverable?.runtime?.runId) {
+            const recoveredEnvironment = recoverable.runtime.environmentId ?? null;
+            const expectedEnvironment = member.t3EnvironmentId ?? null;
+            if (recoverable.runtime.model !== selected.qualified || recoverable.runtime.provider !== activeT3ProviderInstanceId ||
+                recoveredEnvironment !== expectedEnvironment)
+              throw new UnknownTurnSideEffectError(
+                recoverable.runtime.runId,
+                `An expired T3 Pi run cannot be resumed under changed execution identity: expected provider=${activeT3ProviderInstanceId}, model=${selected.qualified}, environment=${expectedEnvironment ?? "local"}; recorded provider=${recoverable.runtime.provider}, model=${recoverable.runtime.model}, environment=${recoveredEnvironment ?? "local"}`,
+              );
+            bind(recoverable.runtime.threadId, recoverable.runtime.runId);
+            result = await this.t3RuntimeGateway!.recover({
+              threadId: recoverable.runtime.threadId,
+              runId: recoverable.runtime.runId,
+              runtimeMode: t3RuntimeMode!,
+              environmentId: recoverable.runtime.environmentId ?? member.t3EnvironmentId,
+              timeoutMs: input.waitMs ?? 300_000,
+              signal,
+            });
+          } else {
+            const managedWorktree = member.t3EnvironmentId
+              ? undefined
+              : this.worktrees?.list(lease.projectId, false)
+                  .find((candidate) => candidate.path === member.cwd);
+            result = await this.t3RuntimeGateway!.run({
+              cwd: member.cwd,
+              ...(managedWorktree
+                ? {
+                    projectWorkspace: managedWorktree.repositoryRoot,
+                    workspaceStrategy: {
+                      type: "existing_worktree" as const,
+                      worktreePath: managedWorktree.path,
+                      branch: managedWorktree.branch,
+                    },
+                  }
+                : {}),
+              title: `${member.name}: ${lease.title}`.slice(0, 240),
+              message: context.text,
+              clientRequestId: requestId(lease.id),
+              model: selected.provider === "google" ? selected.modelId : selected.qualified,
+              providerInstanceId: activeT3ProviderInstanceId,
+              runtimeMode: t3RuntimeMode!,
+              interactionMode: "default",
+              environmentId: member.t3EnvironmentId,
+              ...(member.threadId && member.threadRuntime === "t3" &&
+                  member.threadModel === selected.qualified && member.threadProvider === activeT3ProviderInstanceId
+                ? { existingThreadId: member.threadId }
+                : {}),
+              timeoutMs: input.waitMs ?? 300_000,
+              signal,
+              onStarted: ({ threadId, runId }) => bind(threadId, runId),
+            });
+          }
+          for (const activity of result.activity) {
+            const item = t3ToolItem(activity);
+            if (!item || !this.toolCalls) continue;
+            this.toolCalls.record({
+              projectId: lease.projectId,
+              taskId: lease.id,
+              attemptId: lease.attemptId,
+              fenceEpoch: lease.fenceEpoch,
+              memberId: member.id,
+              event: "completed",
+              item,
+              at: typeof activity.updatedAt === "string" ? Date.parse(activity.updatedAt) || Date.now() : Date.now(),
+            });
+          }
+          if (result.waitingForUser)
+            throw new T3WaitingForUserError(
+              result.threadId,
+              result.runId,
+              result.environmentId ?? member.t3EnvironmentId,
+            );
+          if (result.status !== "completed")
+            throw Error(`T3 Pi runtime ended with status ${result.status}`);
+          bind(result.threadId, result.runId);
+          this.projects.event(lease.projectId, recoverable ? "t3.turn.recovered" : "t3.turn.completed", {
+            taskId: lease.id,
+            attemptId: lease.attemptId,
+            fenceEpoch: lease.fenceEpoch,
+            memberId: member.id,
+            threadId: result.threadId,
+            runId: result.runId,
+            provider: activeT3ProviderInstanceId,
+            model: selected.qualified,
+            runtimeMode: t3RuntimeMode,
+            environmentId: member.t3EnvironmentId ?? null,
+            ...(recoverable ? { recoveredAttemptId: recoverable.id, recoveredAttemptStatus: recoverable.status } : {}),
+          }, member.id, member.id);
+          this.providerHealth?.recordSuccess(selected.provider, selected.modelId, selected.providerGeneration);
+          return {
+            status: "done",
+            submissionId: result.runId,
+            answer: { entryId: 0, text: result.text },
+          };
+        } catch (error) {
+          if (error instanceof T3EnvironmentUnavailableError)
+            throw new DeviceUnavailableError(error.environmentId, error.environmentStatus, error.message);
+          const recorded = errorRecord(error);
+          if (["PROVIDER_RATE_LIMIT", "PROVIDER_QUOTA", "PROVIDER_NETWORK", "MODEL_TIMEOUT"].includes(recorded.code))
+            this.providerHealth?.recordFailure(selected.provider, selected.modelId, recorded, selected.providerGeneration);
+          throw error;
+        }
+      }
+      if (selected.provider === "google") {
+        return this.runLocalAntigravityTurn({
+          lease,
+          member,
+          autonomyMode: project.autonomyMode,
+          modelId: selected.modelId,
+          qualifiedModel: selected.qualified,
+          prompt: context.text,
+          timeoutMs: input.waitMs ?? 300_000,
+          signal,
+          providerGeneration: selected.providerGeneration,
+        });
+      }
+      return this.runLocalDeepSeekHarnessTurn({
+        lease,
+        member,
+        autonomyMode: project.autonomyMode,
+        modelId: selected.modelId,
+        qualifiedModel: selected.qualified,
+        prompt: context.text,
+        timeoutMs: input.waitMs ?? 300_000,
+        signal,
+        providerGeneration: selected.providerGeneration,
+      });
     }
     const device = this.devices.get(member.deviceId);
     if (!device) throw new DeviceUnavailableError(member.deviceId, "unregistered");

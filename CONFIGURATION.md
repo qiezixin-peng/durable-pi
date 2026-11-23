@@ -27,6 +27,13 @@ Generated runtime credentials are preserved when setup is rerun.
 - **Providers:** provider instance names, Codex app-server overrides and optional OpenRouter settings.
   `DPI_COORDINATOR_MODEL`, `DPI_CODEX_REASONING_EFFORT`, `DPI_CODEX_SERVICE_TIER`,
   `DPI_CODEX_SUBAGENT_MODEL`, and `DPI_CODEX_SUBAGENT_REASONING_EFFORT` define the shared T3/Durable defaults.
+- **Local Google Antigravity & DeepSeek Harness:** Google Gemini (`google/*`) runs strictly on this local workstation through
+  Google Antigravity (`~/.gemini/antigravity`; API keys are disabled and stripped at launch), configured
+  via `DPI_GEMINI_DEFAULT_MODEL`, `DPI_GEMINI_MODELS`, `DPI_ANTIGRAVITY_BIN`, and optional
+  `DPI_T3_GEMINI_WORKER_PROVIDER_INSTANCE`. DeepSeek (`deepseek/*`) runs locally through DeepSeek Harness (`dsh headless --json`,
+  reusing desktop `~/.dsh/.credentials.yaml` login or `DEEPSEEK_API_KEY`), configured via `DPI_DEEPSEEK_DEFAULT_MODEL`,
+  `DPI_DEEPSEEK_MODELS`, `DPI_T3_PI_WORKER_PROVIDER_INSTANCE`, and optional local `DPI_ROLE_MODEL_MAP_JSON`.
+  Remote Linux/macOS targets never use Gemini and only use DeepSeek when explicitly deployed and listed in `verifiedModels`.
 - **Retention:** backup, Artifact and memory expiry intervals.
 
 `DPI_DATA_ROOT_MAPPINGS_JSON` only generates routing guidance. It does not grant file access. Actual read access still

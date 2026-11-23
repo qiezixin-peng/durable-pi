@@ -9,6 +9,13 @@ import { memberPermissionWithinTemplate, memberRoleCanWrite, t3RuntimeModeFor } 
 import { durableProjectTeamPlan, durableProjectTemplate } from "../project-templates.js";
 import { ProjectArtifactStore } from "./artifacts.js";
 import { DEFAULT_CODEX_MODEL } from "./codex-model-catalog.js";
+import {
+  inspectLocalModelProviders,
+  isLocalPiModel,
+  isWorkspacePiMember,
+  parseModelSelection,
+  resolveLocalRoleModel,
+} from "./local-model-providers.js";
 import { DataSourceBindingStore, ReadOnlyDataSourceCatalog } from "./data-sources.js";
 import { ProjectHandoffStore } from "./handoffs.js";
 import { ProjectMemoryStore } from "./memories.js";
@@ -48,6 +55,14 @@ export interface DurableProjectMcpOptions {
   /** Treat this cwd as its own T3 project even when it is nested inside an
    * already-managed workspace. Used by the T3 project monitor. */
   exactWorkspaceInitialization?: boolean;
+  /** Optional environment overrides for local model inspection and role defaults. */
+  env?: NodeJS.ProcessEnv;
+  /** Optional Pi auth file path for DeepSeek readiness inspection. */
+  piAuthFile?: string;
+  /** Optional Gemini/Antigravity home directory (~/.gemini) for Antigravity login and session evidence discovery. */
+  geminiHome?: string;
+  /** Optional DeepSeek Harness home directory ($DSH_HOME) for desktop login and session evidence discovery. */
+  dshHome?: string;
   t3EnvironmentLister?: () => Promise<Array<{
     environmentId: string;
     status?: string;
@@ -314,6 +329,12 @@ const PROJECT_TOOLS = [
   {
     name: "list_durable_execution_targets",
     description: "Coordinator-only: list remote T3 execution targets bound to this project, their verified models and current T3 link reachability when available. This never contacts the target filesystem.",
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "list_durable_local_models",
+    description: "Coordinator-only: list locally supported Gemini (google) and DeepSeek (deepseek) providers on this workstation, credential readiness without exposing secrets, official model IDs and optional local role defaults. These models run locally and are never inherited by remote targets.",
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
@@ -608,7 +629,7 @@ const PROJECT_TOOLS = [
   {
     name: "materialize_durable_agent",
     description:
-      "Coordinator-only: idempotently activate one pre-authorized role from this project's team plan. By default, writable roles get an isolated worktree when the project is a clean committed Git root; otherwise the scheduler safely serializes their shared workspace.",
+      "Coordinator-only: idempotently activate one pre-authorized role from this project's team plan. By default, writable roles get an isolated worktree when the project is a clean committed Git root; otherwise the scheduler safely serializes their shared workspace. Optionally select a local Gemini (google) or DeepSeek (deepseek) provider/model for this workstation.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: {
       type: "object",
@@ -616,6 +637,8 @@ const PROJECT_TOOLS = [
         request_id: { type: "string", minLength: 1, maxLength: 240 },
         role: { type: "string", minLength: 1, maxLength: 80 },
         name: { type: "string", minLength: 1, maxLength: 120 },
+        provider: { type: "string", enum: ["codex", "google", "gemini", "deepseek"] },
+        model: { type: "string", minLength: 1, maxLength: 160 },
         workspace_strategy: { type: "string", enum: ["auto", "shared", "worktree"], default: "auto" },
       },
       required: ["request_id", "role"],
@@ -660,7 +683,7 @@ const PROJECT_TOOLS = [
   {
     name: "create_durable_agent",
     description:
-      "Coordinator-only: idempotently create a temporary Agent from an active Codex template without increasing its permission profile. Writable local Agents use an isolated clean Git worktree by default when possible.",
+      "Coordinator-only: idempotently create a temporary Agent from an active local or remote template without increasing its permission profile. Writable local Agents use an isolated clean Git worktree by default when possible. Local temporary Agents may optionally select a Gemini (google) or DeepSeek (deepseek) provider/model.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: {
       type: "object",
@@ -669,6 +692,8 @@ const PROJECT_TOOLS = [
         template_member_id: { type: "string", minLength: 1, maxLength: 64 },
         role: { type: "string", minLength: 1, maxLength: 80 },
         name: { type: "string", minLength: 1, maxLength: 120 },
+        provider: { type: "string", enum: ["codex", "google", "gemini", "deepseek"] },
+        model: { type: "string", minLength: 1, maxLength: 160 },
         permission_profile: {
           type: "string",
           enum: ["ROLE_DEFAULT", "READ_ONLY", "WORKSPACE_WRITE"],
@@ -1072,6 +1097,21 @@ export class DurableProjectMcpServer {
                 ...(cleanupPending ? { cleanupPending: true } : {}),
               };
             }),
+          });
+        }
+        case "list_durable_local_models": {
+          if (!coordinator(member)) throw Error("Only the project Coordinator may inspect local model providers");
+          const summary = inspectLocalModelProviders({
+            env: this.options.env,
+            authFile: this.options.piAuthFile,
+            geminiHome: this.options.geminiHome,
+            dshHome: this.options.dshHome,
+          });
+          return toolResult({
+            projectId: project.id,
+            coordinatorModel: member.model ?? DEFAULT_CODEX_MODEL,
+            localOnlyPolicy: "Google Gemini (google/*) runs strictly on this local workstation through Google Antigravity (API keys are disabled, and remote Linux/macOS targets do not use Gemini). DeepSeek (deepseek/*) runs locally through DeepSeek Harness (dsh headless --json, reusing the desktop DeepSeek Harness login or credential store) and may also run on remote targets when explicitly deployed and listed in verifiedModels.",
+            ...summary,
           });
         }
         case "list_durable_execution_targets": {
@@ -1910,6 +1950,8 @@ export class DurableProjectMcpServer {
           if (!coordinator(member)) throw Error("Only the project Coordinator may materialize planned Agents");
           const requestId = requiredText(args.request_id, "request_id", 240);
           const role = requiredText(args.role, "role", 80).toLowerCase();
+          const explicitProvider = args.provider === undefined ? undefined : requiredText(args.provider, "provider", 32);
+          const explicitModel = args.model === undefined ? undefined : requiredText(args.model, "model", 160);
           const requestedWorkspaceStrategy = args.workspace_strategy === undefined
             ? "auto"
             : requiredText(args.workspace_strategy, "workspace_strategy", 32);
@@ -1918,10 +1960,25 @@ export class DurableProjectMcpServer {
           if (role === "coordinator") throw Error("The Coordinator is already materialized");
           const planned = project.templatePlan.find((item) => item.role.trim().toLowerCase() === role);
           if (!planned) throw Error(`Role ${role} is not pre-authorized by this project's team plan`);
-          const existing = project.members.find((candidate) => candidate.role.trim().toLowerCase() === role);
+          if (!member.cwd) throw Error("The Coordinator has no workspace to assign to a planned Agent");
+          if (member.executor !== "codex" || !member.model)
+            throw Error("Self-service team materialization currently requires a model-bound Codex Coordinator");
+          const selection = resolveLocalRoleModel({
+            role,
+            explicitModel,
+            explicitProvider,
+            fallbackModel: member.model,
+            env: this.options.env,
+          });
+          const existing = project.members.find((candidate) =>
+            !candidate.t3EnvironmentId && candidate.role.trim().toLowerCase() === role
+          );
           if (existing) {
             if (existing.permissionProfile !== planned.permissionProfile)
               throw Error(`Existing ${role} Agent does not match the planned permission profile`);
+            if ((explicitProvider !== undefined || explicitModel !== undefined) &&
+                (existing.executor !== selection.executor || existing.model !== selection.qualified))
+              throw Error(`Role ${role} is already materialized with ${existing.executor}/${existing.model ?? "default"}`);
             const isolated = normalizedPath(existing.cwd ?? "") !== normalizedPath(member.cwd ?? "");
             if (requestedWorkspaceStrategy !== "auto" && (requestedWorkspaceStrategy === "worktree") !== isolated)
               throw Error(`Role ${role} is already materialized with ${isolated ? "worktree" : "shared"} workspace strategy`);
@@ -1933,9 +1990,6 @@ export class DurableProjectMcpServer {
               workspaceStrategy: isolated ? "worktree" : "shared",
             });
           }
-          if (!member.cwd) throw Error("The Coordinator has no workspace to assign to a planned Agent");
-          if (member.executor !== "codex" || !member.model)
-            throw Error("Self-service team materialization currently requires a model-bound Codex Coordinator");
           const name = args.name === undefined
             ? role.replace(/(^|[-_\s]+)(\p{L})/gu, (_match, _prefix, letter: string) => letter.toUpperCase())
             : requiredText(args.name, "name", 120);
@@ -1965,14 +2019,14 @@ export class DurableProjectMcpServer {
           }
           const agent = this.projects.addMember(project.id, {
             id: `planned-${identity}`,
-            deviceId: "local-t3",
-            sessionId: "t3-code",
+            deviceId: selection.executor === "pi" ? `local-${selection.runtime}` : "local-t3",
+            sessionId: selection.executor === "pi" ? selection.runtime : "t3-code",
             agentId: `planned-${identity}`,
             name,
             role,
             permissionProfile: planned.permissionProfile,
-            executor: "codex",
-            model: member.model,
+            executor: selection.executor,
+            model: selection.qualified,
             cwd: assignedCwd,
             parentMemberId: member.id,
             spawnRequestId: `team-plan:${role}`,
@@ -1981,6 +2035,8 @@ export class DurableProjectMcpServer {
             requestId,
             role,
             memberId: agent.id,
+            executor: agent.executor,
+            model: agent.model,
             permissionProfile: agent.permissionProfile,
             requestedWorkspaceStrategy,
             workspaceStrategy,
@@ -2016,9 +2072,17 @@ export class DurableProjectMcpServer {
           if (!source) throw Error(`Data source ${sourceId} is not bound to this project`);
           if (!source.environmentId || !source.sshHost || !source.remoteRoot)
             throw Error(`Data source ${sourceId} is not a remote T3 execution target`);
-          const model = requiredText(args.model, "model", 160);
-          if (!source.verifiedModels?.includes(model))
-            throw Error(`Model ${model} is not verified for data source ${sourceId}`);
+          const rawModel = requiredText(args.model, "model", 160);
+          const selection = parseModelSelection(rawModel, undefined, this.options.env);
+          const model = selection.qualified;
+          if (selection.provider === "google")
+            throw Error("Google Gemini runs strictly locally via Gemini Pro OAuth and is not supported on remote targets; use Codex or a verified remote DeepSeek model");
+          if (!source.verifiedModels?.includes(model) && !source.verifiedModels?.includes(rawModel))
+            throw Error(
+              selection.localOnlyByDefault
+                ? `Model ${model} is not verified for remote target ${sourceId}; deploy Pi + DEEPSEEK_API_KEY on that machine and add ${model} to its verifiedModels before remote use`
+                : `Model ${rawModel} is not verified for data source ${sourceId}`,
+            );
           const relativeTarget = `DurablePiProjects/${slug}`;
           const directory = catalog.listDirectory(sourceId, relativeTarget, 100, project.id);
           if (!directory.entries.some((entry) => entry.name === ".git" && entry.kind === "directory"))
@@ -2032,6 +2096,7 @@ export class DurableProjectMcpServer {
             .find((candidate) => candidate.spawnRequestId === spawnRequestId);
           if (existing) {
             if (existing.role !== role || existing.name !== name || existing.permissionProfile !== planned.permissionProfile ||
+                existing.executor !== selection.executor ||
                 existing.model !== model || existing.cwd !== cwd || existing.t3EnvironmentId !== source.environmentId)
               throw Error("Remote planned Agent is already materialized with different arguments");
             return toolResult({ agent: existing, replayed: true, sourceId, projectSlug: slug, planned });
@@ -2050,7 +2115,7 @@ export class DurableProjectMcpServer {
             name,
             role,
             permissionProfile: planned.permissionProfile,
-            executor: "codex",
+            executor: selection.executor,
             model,
             cwd,
             t3EnvironmentId: source.environmentId,
@@ -2072,9 +2137,10 @@ export class DurableProjectMcpServer {
           const requestId = requiredText(args.request_id, "request_id", 240);
           const memberId = requiredText(args.member_id, "member_id", 64);
           const target = this.projects.getMember(project.id, memberId);
-          if (!target || target.temporary || target.executor !== "codex" || target.t3EnvironmentId ||
+          const localManagedTarget = target && (target.executor === "codex" || isWorkspacePiMember(target));
+          if (!localManagedTarget || target.temporary || target.t3EnvironmentId ||
               target.parentMemberId !== member.id || !target.cwd)
-            throw Error("Only an active local planned Codex Agent owned by this Coordinator can be isolated");
+            throw Error("Only an active local planned Agent owned by this Coordinator can be isolated");
           const planned = project.templatePlan.find((item) =>
             item.role.trim().toLowerCase() === target.role.trim().toLowerCase());
           if (!planned || planned.permissionProfile !== target.permissionProfile || planned.permissionProfile === "READ_ONLY")
@@ -2116,11 +2182,37 @@ export class DurableProjectMcpServer {
           const requestId = requiredText(args.request_id, "request_id", 240);
           const templateId = requiredText(args.template_member_id, "template_member_id", 64);
           const template = this.projects.getMember(project.id, templateId);
-          if (!template || template.executor !== "codex" || !template.model || !template.cwd)
-            throw Error("An active Codex template with a model and workspace is required");
+          const supportedTemplate = template && (template.executor === "codex" || isWorkspacePiMember(template));
+          if (!supportedTemplate || !template.model || !template.cwd)
+            throw Error("An active local or Codex template with a model and workspace is required");
           const role = requiredText(args.role, "role", 80);
           if (coordinator({ ...template, role })) throw Error("Temporary Agents cannot assume the Coordinator role");
           const name = args.name === undefined ? `Temporary ${role}` : requiredText(args.name, "name", 120);
+          const explicitProvider = args.provider === undefined ? undefined : requiredText(args.provider, "provider", 32);
+          const explicitModel = args.model === undefined ? undefined : requiredText(args.model, "model", 160);
+          const selection = explicitProvider !== undefined || explicitModel !== undefined
+            ? parseModelSelection(explicitModel, explicitProvider, this.options.env)
+            : parseModelSelection(template.model, template.executor === "codex" ? "codex" : undefined, this.options.env);
+          if (template.t3EnvironmentId && (explicitProvider !== undefined || explicitModel !== undefined)) {
+            if (selection.provider === "google")
+              throw Error("Google Gemini runs strictly locally via Google Antigravity OAuth and cannot be bound to remote T3 environments");
+            let remoteSource: ReturnType<ReadOnlyDataSourceCatalog["executionSource"]> | undefined;
+            try {
+              remoteSource = new ReadOnlyDataSourceCatalog(this.dataSourceCatalogPath).executionSource(
+                project.id,
+                template.t3EnvironmentId,
+                template.cwd,
+              );
+            } catch {
+              remoteSource = undefined;
+            }
+            if (!remoteSource?.verifiedModels?.includes(selection.qualified))
+              throw Error(
+                selection.localOnlyByDefault
+                  ? `Model ${selection.qualified} is not verified for remote T3 environment ${template.t3EnvironmentId}; deploy Pi + DEEPSEEK_API_KEY on that machine and add it to verifiedModels first`
+                  : `Model ${selection.qualified} is not verified for remote T3 environment ${template.t3EnvironmentId}`,
+              );
+          }
           const permissionProfile = args.permission_profile === undefined
             ? template.permissionProfile
             : requiredText(args.permission_profile, "permission_profile", 32);
@@ -2147,7 +2239,8 @@ export class DurableProjectMcpServer {
           if (existing) {
             const isolated = normalizedPath(existing.cwd ?? "") !== normalizedPath(template.cwd);
             if (existing.role !== role || existing.name !== name ||
-                existing.permissionProfile !== permissionProfile || existing.model !== template.model ||
+                existing.permissionProfile !== permissionProfile ||
+                existing.executor !== selection.executor || existing.model !== selection.qualified ||
                 existing.t3EnvironmentId !== template.t3EnvironmentId ||
                 existing.scopeTaskId !== scopeTaskId)
               throw Error("request_id was reused with different create_durable_agent arguments");
@@ -2188,22 +2281,27 @@ export class DurableProjectMcpServer {
               worktrees.close();
             }
           }
+          const inheritFallback = selection.executor === template.executor && selection.qualified === template.model;
           let agent: ProjectMember;
           try {
             agent = this.projects.addMember(project.id, {
-              deviceId: template.deviceId,
-              sessionId: "t3-code",
-              agentId: `t3-${randomUUID()}`,
+              deviceId: template.t3EnvironmentId ? template.deviceId : (selection.executor === "pi" ? `local-${selection.runtime}` : template.deviceId),
+              sessionId: template.t3EnvironmentId ? "t3-code" : (selection.executor === "pi" ? selection.runtime : "t3-code"),
+              agentId: `${selection.executor === "pi" ? selection.runtime : "t3"}-${randomUUID()}`,
               name,
               role,
               permissionProfile: permissionProfile as "ROLE_DEFAULT" | "READ_ONLY" | "WORKSPACE_WRITE",
-              executor: "codex",
-              model: template.model,
+              executor: selection.executor,
+              model: selection.qualified,
               cwd: assignedCwd,
               ...(template.t3EnvironmentId ? { t3EnvironmentId: template.t3EnvironmentId } : {}),
               temporary: true,
-              allowModelFallback: template.allowModelFallback,
-              fallbackModels: template.fallbackModels,
+              ...(inheritFallback
+                ? {
+                    allowModelFallback: template.allowModelFallback,
+                    fallbackModels: template.fallbackModels,
+                  }
+                : {}),
               parentMemberId: member.id,
               ...(scopeTaskId ? { scopeTaskId } : {}),
               spawnRequestId,
@@ -2220,6 +2318,8 @@ export class DurableProjectMcpServer {
             requestId,
             memberId: agent.id,
             templateMemberId: template.id,
+            executor: agent.executor,
+            model: agent.model,
             requestedWorkspaceStrategy,
             workspaceStrategy,
             ...(!readiness.eligible ? { automaticWorktreeDecision: readiness.reason } : {}),

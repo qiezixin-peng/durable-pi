@@ -74,6 +74,36 @@ providers["codex_durable_coordinator"] = {
         ])),
     },
 }
+pi_instance_id = os.environ.get("DPI_T3_PI_WORKER_PROVIDER_INSTANCE", "pi_durable_worker").strip() or "pi_durable_worker"
+if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", pi_instance_id):
+    raise SystemExit("DPI_T3_PI_WORKER_PROVIDER_INSTANCE is invalid")
+pi_agent_dir = os.environ.get("PI_CODING_AGENT_DIR", os.path.expanduser("~/.pi/agent"))
+pi_auth_providers = set()
+try:
+    with open(os.path.join(pi_agent_dir, "auth.json"), "r", encoding="utf-8") as fh:
+        auth_doc = json.load(fh)
+        if isinstance(auth_doc, dict):
+            for k, v in auth_doc.items():
+                if isinstance(v, dict) and (v.get("key") or v.get("access")):
+                    pi_auth_providers.add(str(k).strip().lower())
+except (FileNotFoundError, json.JSONDecodeError):
+    pass
+pi_flag = os.environ.get("DPI_T3_PI_RUNTIME", "").strip()
+pi_has_creds = bool(
+    os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    or ("deepseek" in pi_auth_providers)
+)
+pi_binary = os.path.join(pi_agent_dir, "bin", "pi")
+pi_installed = os.path.isfile(pi_binary) or any(
+    os.path.isfile(os.path.join(p, "pi")) for p in os.environ.get("PATH", "").split(os.pathsep) if p
+)
+if pi_flag != "0" and pi_installed and (pi_flag == "1" or pi_has_creds):
+    providers[pi_instance_id] = {
+        "driver": "pi",
+        "displayName": "Pi · Durable Worker (DeepSeek)",
+        "enabled": True,
+        "config": {"launchArgs": "--no-mcp"},
+    }
 settings["defaultModelSelection"] = {
     "instanceId": "codex_durable_coordinator",
     "model": model,

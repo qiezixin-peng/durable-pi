@@ -40,6 +40,12 @@ import { BACKGROUND_CONTEXT as ctx, withAbortSignal } from "@earendil-works/chor
 import { createModels } from "@earendil-works/pi-ai/models";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
+import {
+  createDeepSeekBackendProvider,
+  parseBackendProviders,
+  type BackendProviderId,
+  type BackendProviderSpec,
+} from "./local-providers.js";
 import { curatedModels, defaultModelId } from "./model-catalog.js";
 import { fauxModels, installFaux } from "./faux.js";
 import {
@@ -98,7 +104,7 @@ export interface StoreOptions {
   dataDir: string;
   startDirs: string[];
   name: string;
-  provider: "openrouter" | "openai" | "faux";
+  provider: BackendProviderSpec;
   authFile?: string;
   hubUrl?: string;
   hubToken?: string;
@@ -155,6 +161,7 @@ const decodeCursor = (cursor?: string) => {
 export class Store {
   readonly runtime: PiDurableHarnessAdapter;
   readonly models;
+  readonly providers: readonly BackendProviderId[];
   readonly opened = new Map<string, Opened>();
   readonly errors = new Map<string, string>();
   readonly catalog: DatabaseSync;
@@ -190,22 +197,28 @@ export class Store {
   }
 
   private constructor(readonly options: StoreOptions) {
+    this.providers = parseBackendProviders(options.provider);
     this.models = createModels({
       ...(options.authFile ? { credentials: new JsonCredentialStore(options.authFile) } : {}),
     });
     this.runtime = new PiDurableHarnessAdapter(this, DURABLE_VERSION);
-    if (options.provider === "faux") installFaux(this.models);
-    else if (options.provider === "openrouter") {
-      const provider = openrouterProvider();
-      const catalog = provider.getModels();
-      for (const model of curatedModels)
-        if (!catalog.some((m) => m.id === model.id)) throw Error(`OpenRouter catalog missing ${model.id}`);
-      this.models.setProvider({
-        ...provider,
-        getModels: () => catalog.filter((m) => curatedModels.some((c) => c.id === m.id)),
-      });
-    } else {
-      this.models.setProvider(openaiProvider());
+    for (const providerId of this.providers) {
+      if (providerId === "faux") {
+        installFaux(this.models);
+      } else if (providerId === "openrouter") {
+        const provider = openrouterProvider();
+        const catalog = provider.getModels();
+        for (const model of curatedModels)
+          if (!catalog.some((m) => m.id === model.id)) throw Error(`OpenRouter catalog missing ${model.id}`);
+        this.models.setProvider({
+          ...provider,
+          getModels: () => catalog.filter((m) => curatedModels.some((c) => c.id === m.id)),
+        });
+      } else if (providerId === "openai") {
+        this.models.setProvider(openaiProvider());
+      } else if (providerId === "deepseek") {
+        this.models.setProvider(createDeepSeekBackendProvider());
+      }
     }
     mkdirSync(options.dataDir, { recursive: true, mode: 0o700 });
     this.unlockCatalog = lockFile(`${this.catalogPath}.lock`);
@@ -283,19 +296,28 @@ export class Store {
   }
 
   private defaultModel() {
-    if (this.options.provider === "faux") return fauxModels[0].id;
-    if (this.options.provider === "openrouter") return defaultModelId;
+    if (this.providers.includes("faux")) return fauxModels[0].id;
+    if (this.providers.length === 1 && this.providers[0] === "openrouter") return defaultModelId;
+    const preferred = [
+      process.env.DPI_DEEPSEEK_DEFAULT_MODEL?.replace(/^deepseek\//i, ""),
+      "deepseek-chat",
+      "deepseek-reasoner",
+      "deepseek-v4-pro",
+      "gpt-6.1-sol",
+      "gpt-6-sol",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+    ].filter((id): id is string => Boolean(id));
     return (
-      ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"].find((id) =>
-        this.modelList.some((model) => model.id === id)
-      ) ??
+      preferred.find((id) => this.modelList.some((model) => model.id === id)) ??
       this.modelList[0]?.id ??
-      "gpt-5.6-sol"
+      (this.providers[0] === "deepseek" ? "deepseek-chat" : "gpt-5.6-sol")
     );
   }
 
   private async loadModels(): Promise<ModelInfo[]> {
-    if (this.options.provider === "faux")
+    if (this.providers.includes("faux"))
       return fauxModels.map((m) => ({
         id: m.id,
         provider: "faux",
@@ -317,77 +339,105 @@ export class Store {
           source: "platform-verified",
         },
       }));
-    if (this.options.provider === "openai") {
-      const available = await this.models.getAvailable("openai", { signal: AbortSignal.timeout(10_000) });
-      return available.map((m) => ({
-        id: m.id,
-        provider: "openai",
-        name: m.name,
-        tier: "subscription",
-        icon: "openai.png",
-        contextWindow: m.contextWindow,
-        reasoning: m.reasoning,
-        cost: { input: m.cost.input, output: m.cost.output },
-        capabilities: {
-          textInput: m.input.includes("text") ? "supported" : "unsupported",
-          imageInput: m.input.includes("image") ? "supported" : "unsupported",
-          toolCalling: "unknown",
-          streaming: "supported",
-          structuredOutput: "unknown",
-          reasoning: m.reasoning ? "supported" : "unsupported",
-          contextWindow: m.contextWindow,
-          maxOutputTokens: m.maxTokens,
-          source: "provider-metadata",
-        },
-      }));
-    }
-    const available = await this.models.getAvailable("openrouter", { signal: AbortSignal.timeout(10000) });
-    return curatedModels.flatMap((c) => {
-      const m = available.find((m) => m.id === c.id);
-      return m
-        ? [
-            {
-              id: m.id,
-              provider: "openrouter",
-              name: c.name,
-              tier: c.tier,
-              icon: c.icon,
+    const list: ModelInfo[] = [];
+    for (const providerId of this.providers) {
+      if (providerId === "openrouter") {
+        const available = await this.models.getAvailable("openrouter", { signal: AbortSignal.timeout(10000) });
+        list.push(
+          ...curatedModels.flatMap((c) => {
+            const m = available.find((candidate) => candidate.id === c.id);
+            return m
+              ? [
+                  {
+                    id: m.id,
+                    provider: "openrouter",
+                    name: c.name,
+                    tier: c.tier,
+                    icon: c.icon,
+                    contextWindow: m.contextWindow,
+                    reasoning: m.reasoning,
+                    cost: { input: m.cost.input, output: m.cost.output },
+                    capabilities: {
+                      textInput: m.input.includes("text") ? "supported" as const : "unsupported" as const,
+                      imageInput: m.input.includes("image") ? "supported" as const : "unsupported" as const,
+                      toolCalling: "unknown" as const,
+                      streaming: "supported" as const,
+                      structuredOutput: "unknown" as const,
+                      reasoning: m.reasoning ? "supported" as const : "unsupported" as const,
+                      contextWindow: m.contextWindow,
+                      maxOutputTokens: m.maxTokens,
+                      source: "provider-metadata" as const,
+                    },
+                  },
+                ]
+              : [];
+          }),
+        );
+        continue;
+      }
+      if (providerId === "openai" || providerId === "deepseek") {
+        let available: Awaited<ReturnType<typeof this.models.getAvailable>> = [];
+        try {
+          available = await this.models.getAvailable(providerId, { signal: AbortSignal.timeout(10_000) });
+        } catch (error) {
+          if (this.providers.length === 1) throw error;
+          continue;
+        }
+        const icon = providerId === "deepseek" ? "deepseek.png" : "openai.png";
+        const tier = providerId === "openai" ? "subscription" : "direct";
+        list.push(
+          ...available.map((m) => ({
+            id: m.id,
+            provider: providerId,
+            name: m.name,
+            tier,
+            icon,
+            contextWindow: m.contextWindow,
+            reasoning: m.reasoning,
+            cost: { input: m.cost.input, output: m.cost.output },
+            capabilities: {
+              textInput: m.input.includes("text") ? "supported" as const : "unsupported" as const,
+              imageInput: m.input.includes("image") ? "supported" as const : "unsupported" as const,
+              toolCalling: "supported" as const,
+              streaming: "supported" as const,
+              structuredOutput: "unknown" as const,
+              reasoning: m.reasoning ? "supported" as const : "unsupported" as const,
               contextWindow: m.contextWindow,
-              reasoning: m.reasoning,
-              cost: { input: m.cost.input, output: m.cost.output },
-              capabilities: {
-                textInput: m.input.includes("text") ? "supported" : "unsupported",
-                imageInput: m.input.includes("image") ? "supported" : "unsupported",
-                toolCalling: "unknown",
-                streaming: "supported",
-                structuredOutput: "unknown",
-                reasoning: m.reasoning ? "supported" : "unsupported",
-                contextWindow: m.contextWindow,
-                maxOutputTokens: m.maxTokens,
-                source: "provider-metadata",
-              },
+              maxOutputTokens: m.maxTokens,
+              source: "provider-metadata" as const,
             },
-          ]
-        : [];
-    });
+          })),
+        );
+      }
+    }
+    return list;
   }
 
   routedModel(model?: ModelRef): ModelRef {
-    if (this.options.provider === "faux") {
+    if (this.providers.includes("faux")) {
       const id = fauxModels.some((m) => m.id === model?.modelId) ? model!.modelId : fauxModels[0].id;
       return { provider: "faux", modelId: id };
     }
-    if (this.options.provider === "openai") {
-      const modelId =
-        model?.provider === "openai" && this.models.getModel("openai", model.modelId)
-          ? model.modelId
-          : this.defaultModel();
-      return { provider: "openai", modelId };
+    if (model && this.providers.includes(model.provider as BackendProviderId)) {
+      if (model.provider === "openrouter") {
+        const exact = curatedModels.some((c) => c.id === model.modelId) ? model.modelId : defaultModelId;
+        return { provider: "openrouter", modelId: exact };
+      }
+      if (this.models.getModel(model.provider, model.modelId))
+        return { provider: model.provider, modelId: model.modelId };
     }
-    const exact = model?.provider === "openrouter" ? model.modelId : `${model?.provider}/${model?.modelId}`;
+    if (this.providers.length === 1 && this.providers[0] === "openrouter") {
+      const exact = model?.provider === "openrouter" ? model.modelId : `${model?.provider}/${model?.modelId}`;
+      return {
+        provider: "openrouter",
+        modelId: curatedModels.some((m) => m.id === exact) ? exact : defaultModelId,
+      };
+    }
+    const fallbackId = this.defaultModel();
+    const matched = this.modelList.find((candidate) => candidate.id === fallbackId) ?? this.modelList[0];
     return {
-      provider: "openrouter",
-      modelId: curatedModels.some((m) => m.id === exact) ? exact : defaultModelId,
+      provider: matched?.provider ?? this.providers[0]!,
+      modelId: matched?.id ?? fallbackId,
     };
   }
 
@@ -396,15 +446,13 @@ export class Store {
     if (!m || typeof m.provider !== "string" || typeof m.modelId !== "string")
       throw invalid("model must be { provider, modelId }");
     const known =
-      this.options.provider === "faux"
+      this.providers.includes("faux")
         ? m.provider === "faux" && fauxModels.some((f) => f.id === m.modelId)
-        : this.options.provider === "openai"
-          ? m.provider === "openai" &&
-            this.modelList.some((candidate) => candidate.id === m.modelId) &&
-            !!this.models.getModel(m.provider, m.modelId)
-          : m.provider === "openrouter" &&
-          curatedModels.some((c) => c.id === m.modelId) &&
-          !!this.models.getModel(m.provider, m.modelId);
+        : this.providers.includes(m.provider as BackendProviderId) &&
+          (m.provider === "openrouter"
+            ? curatedModels.some((c) => c.id === m.modelId) && !!this.models.getModel(m.provider, m.modelId)
+            : this.modelList.some((candidate) => candidate.provider === m.provider && candidate.id === m.modelId) &&
+              !!this.models.getModel(m.provider, m.modelId));
     if (!known) throw invalid(`Unknown model ${m.provider}/${m.modelId}. Choose one from GET /v1/device models`);
     return { provider: m.provider, modelId: m.modelId };
   }
@@ -600,7 +648,7 @@ export class Store {
       });
       registry.install(playground);
       // Custom extensions are installed but not selected: an agent turns them on in its own selection.
-      const addons = createAddons({ offline: this.options.provider === "faux" });
+      const addons = createAddons({ offline: this.providers.includes("faux") });
       for (const extension of addons.list) registry.install(extension);
       const harness = await Harness.open(
         await openNodeSqliteStorage(row.dbPath),

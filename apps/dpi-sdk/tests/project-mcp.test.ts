@@ -76,6 +76,7 @@ test("project MCP exposes bounded read-only project tools without leaking anothe
         "get_durable_project",
         "list_durable_agents",
         "list_durable_execution_targets",
+        "list_durable_local_models",
         "list_durable_data_folders",
         "bind_durable_data_folder",
         "list_durable_tasks",
@@ -1686,6 +1687,193 @@ test("project MCP prepares divergent integration only in an isolated temporary A
     assert.equal(finalizedReplayValue.replayed, true);
     assert.equal(execFileSync("git", ["-C", workspace, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), integrationRevision);
     assert.equal(execFileSync("git", ["-C", workspace, "status", "--porcelain"], { encoding: "utf8" }).trim(), "");
+  } finally {
+    server.close();
+  }
+});
+
+test("project MCP exposes local Gemini/DeepSeek providers, supports role defaults and blocks remote inheritance", async () => {
+  const root = await mkdtemp(join(process.env.DPI_TEST_TEMP ?? tmpdir(), "durable-pi-local-models-mcp-"));
+  const workspace = join(root, "workspace");
+  await mkdir(workspace);
+  const database = join(root, "projects.sqlite");
+  const projects = new ProjectRegistry(database);
+  projects.create({
+    id: "alpha",
+    name: "Alpha",
+    autonomyMode: "SUPERVISED",
+    templateId: "web",
+    templatePlan: [
+      { role: "coordinator", permissionProfile: "READ_ONLY" },
+      { role: "coder", permissionProfile: "WORKSPACE_WRITE" },
+      { role: "reviewer", permissionProfile: "READ_ONLY" },
+      { role: "researcher", permissionProfile: "READ_ONLY" },
+    ],
+  });
+  projects.addMember("alpha", {
+    id: "coord",
+    deviceId: "local-codex",
+    sessionId: "t3",
+    agentId: "thread-coord",
+    name: "Coordinator",
+    role: "coordinator",
+    permissionProfile: "READ_ONLY",
+    executor: "codex",
+    model: "gpt-6.1-sol",
+    cwd: workspace,
+  });
+  projects.addMember("alpha", {
+    id: "remote-linux-coder",
+    deviceId: "linux-home",
+    sessionId: "t3-code",
+    agentId: "remote-linux-coder",
+    name: "Linux Coder",
+    role: "coder",
+    permissionProfile: "WORKSPACE_WRITE",
+    executor: "codex",
+    model: "gpt-5.6-sol",
+    cwd: "/home/user/DurablePiProjects/alpha",
+    t3EnvironmentId: "env-linux-b",
+  });
+  projects.close();
+
+  const dshHome = join(root, ".dsh");
+  await mkdir(dshHome, { recursive: true });
+  await writeFile(
+    join(dshHome, ".credentials.yaml"),
+    "version: 1\nrecords:\n  - kind: deepseek-account\n    payload:\n      token: secret-ds-token\n      issuer: https://chat.deepseek.com\n",
+    "utf8",
+  );
+  const geminiHome = join(root, ".gemini");
+  await mkdir(join(geminiHome, "antigravity-cli"), { recursive: true });
+  await writeFile(
+    join(geminiHome, "antigravity-cli", "acp_token.json"),
+    JSON.stringify({ refresh_token: "secret-cli-oauth" }),
+    "utf8",
+  );
+  const server = new DurableProjectMcpServer({
+    cwd: workspace,
+    databasePath: database,
+    worktreeRoot: join(root, "worktrees"),
+    env: {
+      DPI_ROLE_MODEL_MAP_JSON: JSON.stringify({ reviewer: "deepseek/deepseek-flash" }),
+    },
+    geminiHome,
+    dshHome,
+  });
+  try {
+    const listed = await server.handle({
+      jsonrpc: "2.0", id: "local-models", method: "tools/call",
+      params: { name: "list_durable_local_models", arguments: {} },
+    });
+    const localSummary = (listed?.result as {
+      structuredContent: {
+        providers: Array<{ provider: string; runtime: string; configured: boolean; authSource: string; remoteAllowedByDefault: boolean }>;
+        roleModelMap: Record<string, string>;
+      };
+    }).structuredContent;
+    assert.equal(JSON.stringify(localSummary).includes("secret-ds-token"), false);
+    assert.equal(JSON.stringify(localSummary).includes("secret-cli-oauth"), false);
+    assert.equal(localSummary.providers.find((p) => p.provider === "google")?.authSource, "antigravity-cli-account");
+    assert.equal(localSummary.providers.find((p) => p.provider === "google")?.runtime, "antigravity");
+    assert.equal(localSummary.providers.find((p) => p.provider === "deepseek")?.authSource, "dsh-account");
+    assert.equal(localSummary.providers.find((p) => p.provider === "deepseek")?.runtime, "deepseek-harness");
+    assert.equal(localSummary.providers.every((p) => p.remoteAllowedByDefault === false), true);
+    assert.deepEqual(localSummary.roleModelMap, { reviewer: "deepseek/deepseek-flash" });
+
+    // Role mapped via DPI_ROLE_MODEL_MAP_JSON materializes as local DeepSeek Harness reviewer
+    const materializedReviewer = await server.handle({
+      jsonrpc: "2.0", id: "mat-reviewer", method: "tools/call",
+      params: {
+        name: "materialize_durable_agent",
+        arguments: { request_id: "req-reviewer", role: "reviewer" },
+      },
+    });
+    const reviewer = (materializedReviewer?.result as {
+      structuredContent: { agent: { executor: string; sessionId: string; model: string; permissionProfile: string } };
+    }).structuredContent.agent;
+    assert.equal(reviewer.executor, "pi");
+    assert.equal(reviewer.sessionId, "deepseek-harness");
+    assert.equal(reviewer.model, "deepseek/deepseek-flash");
+    assert.equal(reviewer.permissionProfile, "READ_ONLY");
+
+    // Explicit Gemini provider/model on coder
+    const materializedCoder = await server.handle({
+      jsonrpc: "2.0", id: "mat-coder", method: "tools/call",
+      params: {
+        name: "materialize_durable_agent",
+        arguments: {
+          request_id: "req-coder",
+          role: "coder",
+          provider: "gemini",
+          model: "gemini-2.5-pro",
+          workspace_strategy: "shared",
+        },
+      },
+    });
+    const coder = (materializedCoder?.result as {
+      structuredContent: { agent: { id: string; executor: string; model: string; permissionProfile: string } };
+    }).structuredContent.agent;
+    assert.equal(coder.executor, "pi");
+    assert.equal(coder.model, "google/gemini-2.5-pro");
+    assert.equal(coder.permissionProfile, "WORKSPACE_WRITE");
+
+    // Unmapped role without explicit model keeps default Codex coordinator model
+    const materializedResearcher = await server.handle({
+      jsonrpc: "2.0", id: "mat-researcher", method: "tools/call",
+      params: {
+        name: "materialize_durable_agent",
+        arguments: { request_id: "req-researcher", role: "researcher" },
+      },
+    });
+    const researcher = (materializedResearcher?.result as {
+      structuredContent: { agent: { executor: string; model: string } };
+    }).structuredContent.agent;
+    assert.equal(researcher.executor, "codex");
+    assert.equal(researcher.model, "gpt-6.1-sol");
+
+    // Temporary local DeepSeek specialist works from local template
+    const tempLocal = await server.handle({
+      jsonrpc: "2.0", id: "temp-ds", method: "tools/call",
+      params: {
+        name: "create_durable_agent",
+        arguments: {
+          request_id: "req-temp-ds",
+          template_member_id: coder.id,
+          role: "security-reviewer",
+          permission_profile: "READ_ONLY",
+          provider: "deepseek",
+          model: "deepseek-chat",
+        },
+      },
+    });
+    const tempAgent = (tempLocal?.result as {
+      structuredContent: { executor: string; model: string; temporary: boolean; permissionProfile: string };
+    }).structuredContent;
+    assert.equal(tempAgent.executor, "pi");
+    assert.equal(tempAgent.model, "deepseek/deepseek-chat");
+    assert.equal(tempAgent.temporary, true);
+    assert.equal(tempAgent.permissionProfile, "READ_ONLY");
+
+    // Remote template MUST reject unverified Gemini/DeepSeek models
+    const blockedRemoteTemp = await server.handle({
+      jsonrpc: "2.0", id: "temp-remote-blocked", method: "tools/call",
+      params: {
+        name: "create_durable_agent",
+        arguments: {
+          request_id: "req-remote-blocked",
+          template_member_id: "remote-linux-coder",
+          role: "coder",
+          provider: "google",
+          model: "gemini-2.5-pro",
+        },
+      },
+    });
+    assert.equal((blockedRemoteTemp?.result as { isError: boolean }).isError, true);
+    assert.match(
+      (blockedRemoteTemp?.result as { content: Array<{ text: string }> }).content[0]!.text,
+      /strictly locally via Google Antigravity OAuth/,
+    );
   } finally {
     server.close();
   }

@@ -5,6 +5,7 @@ import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { ProjectAutonomyMode, ProjectEvent, ProjectMember, ProjectPermissionProfile, ProjectSummary, ProjectTemplateRole } from "../api.js";
+import { isLocalPiModel } from "./local-model-providers.js";
 import { dpiHome } from "./registry.js";
 
 export const PROJECT_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -43,7 +44,7 @@ type MemberRow = {
   t3_environment_id: string | null;
   codex_thread_id: string | null;
   codex_thread_model: string | null;
-  codex_thread_runtime: "codex-app-server" | "t3" | null;
+  codex_thread_runtime: "codex-app-server" | "t3" | "deepseek-harness" | "antigravity" | "pi-cli" | null;
   codex_thread_provider: string | null;
   codex_tools_version: number;
   temporary: number;
@@ -532,15 +533,19 @@ export class ProjectRegistry {
     const executor = input.executor ?? "pi";
     if (executor !== "pi" && executor !== "codex") throw Error("Invalid project member executor");
     const model = input.model === undefined ? null : clean(input.model, "Model", 160);
+    const cwd = input.cwd === undefined ? null : clean(input.cwd, "Working directory", 1000);
+    const workspaceManagedPi = executor === "pi" && Boolean(cwd) && Boolean(model);
+    if (executor === "codex" && isLocalPiModel(model))
+      throw Error("Gemini and DeepSeek models require executor='pi' and run locally on this workstation");
     const allowModelFallback = input.allowModelFallback === true;
     const fallbackModels = modelFallbacks(input.fallbackModels, model);
-    if (executor !== "codex" && (allowModelFallback || fallbackModels.length))
+    if (executor !== "codex" && !workspaceManagedPi && (allowModelFallback || fallbackModels.length))
       throw Error("Model fallback is available only for Codex members");
     if (allowModelFallback && !fallbackModels.length)
       throw Error("At least one fallback model is required when automatic fallback is enabled");
-    const cwd = input.cwd === undefined ? null : clean(input.cwd, "Working directory", 1000);
     const t3EnvironmentId = input.t3EnvironmentId === undefined ? null : clean(input.t3EnvironmentId, "T3 environment id", 160);
-    if (t3EnvironmentId && executor !== "codex") throw Error("T3 environment binding is available only for Codex members");
+    if (t3EnvironmentId && executor !== "codex" && !workspaceManagedPi)
+      throw Error("T3 environment binding is available only for Codex members");
     const parentMemberId = input.parentMemberId === undefined ? null : clean(input.parentMemberId, "Parent member id", 64);
     if (parentMemberId && !this.getMember(projectId, parentMemberId)) throw Error("Parent member is not active in this project");
     const scopeTaskId = input.scopeTaskId === undefined ? null : clean(input.scopeTaskId, "Scope task id", 160);
@@ -608,12 +613,16 @@ export class ProjectRegistry {
   ) {
     const current = this.getMember(projectId, memberId);
     if (!current) throw Error(`Active project member not found: ${memberId}`);
+    const workspaceManagedPi = current.executor === "pi" && Boolean(current.cwd);
+    const supportsManagedModel = current.executor === "codex" || workspaceManagedPi;
     const role = patch.role === undefined ? current.role : clean(patch.role, "Member role", 80);
     const model = patch.model === undefined
       ? current.model
       : clean(patch.model, "Member model", 160);
-    if (patch.model !== undefined && current.executor !== "codex")
+    if (patch.model !== undefined && !supportsManagedModel)
       throw Error("Model updates are available only for Codex members");
+    if (patch.model !== undefined && current.executor === "codex" && isLocalPiModel(model))
+      throw Error("Gemini and DeepSeek models require executor='pi' and run locally on this workstation");
     const permissionProfile = patch.permissionProfile ?? current.permissionProfile;
     if (!["ROLE_DEFAULT", "READ_ONLY", "WORKSPACE_WRITE"].includes(permissionProfile))
       throw Error("Invalid project member permission profile");
@@ -621,7 +630,7 @@ export class ProjectRegistry {
     const fallbackModels = patch.fallbackModels === undefined
       ? current.fallbackModels
       : modelFallbacks(patch.fallbackModels, model);
-    if (current.executor !== "codex" && (allowModelFallback || fallbackModels.length))
+    if (!supportsManagedModel && (allowModelFallback || fallbackModels.length))
       throw Error("Model fallback is available only for Codex members");
     if (allowModelFallback && !fallbackModels.length)
       throw Error("At least one fallback model is required when automatic fallback is enabled");
@@ -630,12 +639,12 @@ export class ProjectRegistry {
       : patch.t3EnvironmentId === null
         ? null
         : clean(patch.t3EnvironmentId, "T3 environment id", 160);
-    if (t3EnvironmentId && current.executor !== "codex")
+    if (t3EnvironmentId && !supportsManagedModel)
       throw Error("T3 environment binding is available only for Codex members");
     const cwd = patch.cwd === undefined
       ? current.cwd ?? null
       : clean(patch.cwd, "Member working directory", 500);
-    if (patch.cwd !== undefined && current.executor !== "codex")
+    if (patch.cwd !== undefined && !supportsManagedModel)
       throw Error("Working directory updates are available only for Codex members");
     const now = Date.now();
     const workspaceChanged = cwd !== (current.cwd ?? null);
@@ -715,7 +724,7 @@ export class ProjectRegistry {
     threadId: string,
     codexToolsVersion = 0,
     threadModel?: string,
-    threadRuntime: "codex-app-server" | "t3" = "codex-app-server",
+    threadRuntime: "codex-app-server" | "t3" | "deepseek-harness" | "antigravity" | "pi-cli" = "codex-app-server",
     threadProvider = "codex",
   ) {
     const cleanThreadId = clean(threadId, "Codex thread id", 160);
@@ -723,7 +732,7 @@ export class ProjectRegistry {
       throw Error("Invalid Codex tools version");
     return this.transaction(() => {
       const result = this.db
-        .prepare("UPDATE project_members SET codex_thread_id=?,codex_tools_version=?,codex_thread_model=?,codex_thread_runtime=?,codex_thread_provider=? WHERE project_id=? AND id=? AND executor='codex'")
+        .prepare("UPDATE project_members SET codex_thread_id=?,codex_tools_version=?,codex_thread_model=?,codex_thread_runtime=?,codex_thread_provider=? WHERE project_id=? AND id=? AND (executor='codex' OR (executor='pi' AND cwd IS NOT NULL))")
         .run(cleanThreadId, codexToolsVersion, threadModel ? clean(threadModel, "Codex thread model", 160) : null, threadRuntime, clean(threadProvider, "Codex thread provider", 64), projectId, memberId);
       if (!result.changes) throw Error(`Codex project member not found: ${memberId}`);
       this.event(projectId, "member.thread.updated", { memberId, threadId: cleanThreadId, codexToolsVersion, threadModel, threadRuntime, threadProvider }, memberId);
@@ -733,14 +742,15 @@ export class ProjectRegistry {
 
   clearMemberThread(projectId: string, memberId: string, reason = "EXPLICIT_RESET") {
     const current = this.getMember(projectId, memberId);
-    if (!current || current.executor !== "codex") throw Error(`Codex project member not found: ${memberId}`);
+    const supportsThread = current && (current.executor === "codex" || (current.executor === "pi" && Boolean(current.cwd)));
+    if (!supportsThread) throw Error(`Codex project member not found: ${memberId}`);
     if (!current.threadId) return current;
     const cleanReason = clean(reason, "Thread detach reason", 120);
     return this.transaction(() => {
       this.db.prepare(
         `UPDATE project_members SET codex_thread_id=NULL,codex_tools_version=0,codex_thread_model=NULL,
            codex_thread_runtime='codex-app-server',codex_thread_provider=NULL
-         WHERE project_id=? AND id=? AND executor='codex' AND lifecycle_state!='ARCHIVED'`,
+         WHERE project_id=? AND id=? AND (executor='codex' OR (executor='pi' AND cwd IS NOT NULL)) AND lifecycle_state!='ARCHIVED'`,
       ).run(projectId, memberId);
       this.event(projectId, "member.thread.detached", {
         memberId,

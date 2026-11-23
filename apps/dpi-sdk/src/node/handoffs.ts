@@ -143,7 +143,8 @@ const validatedMemberBlueprints = (value: unknown): HandoffMemberBlueprint[] => 
       typeof member.temporary !== "boolean" ||
       !["ACTIVE", "IDLE", "ARCHIVED"].includes(member.lifecycleState)
     ) throw Error(`Invalid handoff member blueprint: ${member.id}`);
-    if (member.executor !== "codex" && (member.allowModelFallback || member.fallbackModels.length))
+    const workspaceManagedPi = member.executor === "pi" && Boolean(member.cwd);
+    if (member.executor !== "codex" && !workspaceManagedPi && (member.allowModelFallback || member.fallbackModels.length))
       throw Error(`Invalid handoff model fallback policy: ${member.id}`);
     if (member.allowModelFallback && !member.fallbackModels.length)
       throw Error(`Invalid handoff model fallback policy: ${member.id}`);

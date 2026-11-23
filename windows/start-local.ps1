@@ -45,8 +45,19 @@ if ([string]::IsNullOrWhiteSpace($env:DPI_T3_RUNTIME)) { $env:DPI_T3_RUNTIME = '
 if ([string]::IsNullOrWhiteSpace($env:DPI_T3_WORKER_PROVIDER_INSTANCE)) {
   $env:DPI_T3_WORKER_PROVIDER_INSTANCE = 'codex_durable_worker'
 }
+if ([string]::IsNullOrWhiteSpace($env:DPI_T3_PI_WORKER_PROVIDER_INSTANCE)) {
+  $env:DPI_T3_PI_WORKER_PROVIDER_INSTANCE = 'pi_durable_worker'
+}
 if ([string]::IsNullOrWhiteSpace($env:DPI_T3_COORDINATOR_PROVIDER_INSTANCE)) {
   $env:DPI_T3_COORDINATOR_PROVIDER_INSTANCE = 'codex_durable_coordinator'
+}
+$localPiConfigured = ($env:DPI_T3_PI_RUNTIME -eq '1') -or (-not [string]::IsNullOrWhiteSpace($env:DEEPSEEK_API_KEY))
+$piAvailable = [bool](Get-Command pi -ErrorAction SilentlyContinue)
+if ($localPiConfigured -and $piAvailable) {
+  $piProviderScript = Join-Path $PSScriptRoot 'configure-pi-providers.ps1'
+  if (Test-Path -LiteralPath $piProviderScript) {
+    & $piProviderScript | Out-Null
+  }
 }
 if ($env:DPI_T3_RUNTIME -eq '1') {
   $mcpBundle = Join-Path $repoRoot 'apps\dpi-playground\dist\mcp\main.mjs'
@@ -56,15 +67,21 @@ if ($env:DPI_T3_RUNTIME -eq '1') {
   if (-not (Get-Command t3 -ErrorAction SilentlyContinue)) {
     throw 'T3 Code CLI is required while DPI_T3_RUNTIME=1.'
   }
-  $providerChanged = & (Join-Path $PSScriptRoot 'configure-t3-worker-provider.ps1') `
-    -WorkerInstanceId $env:DPI_T3_WORKER_PROVIDER_INSTANCE `
-    -CoordinatorInstanceId $env:DPI_T3_COORDINATOR_PROVIDER_INSTANCE `
-    -DefaultModel $(if ($env:DPI_COORDINATOR_MODEL) { $env:DPI_COORDINATOR_MODEL } else { 'gpt-5.6-sol' }) `
-    -ReasoningEffort $(if ($env:DPI_CODEX_REASONING_EFFORT) { $env:DPI_CODEX_REASONING_EFFORT } else { 'medium' }) `
-    -ServiceTier $(if ($env:DPI_CODEX_SERVICE_TIER) { $env:DPI_CODEX_SERVICE_TIER } else { 'fast' }) `
-    -SubagentModel $(if ($env:DPI_CODEX_SUBAGENT_MODEL) { $env:DPI_CODEX_SUBAGENT_MODEL } else { 'gpt-5.6-sol' }) `
-    -SubagentReasoningEffort $(if ($env:DPI_CODEX_SUBAGENT_REASONING_EFFORT) { $env:DPI_CODEX_SUBAGENT_REASONING_EFFORT } else { 'medium' }) `
-    -WorkspaceBaseDirectory $(if ($env:DPI_T3_WORKSPACE_BASE) { $env:DPI_T3_WORKSPACE_BASE } else { $env:DPI_START_DIRS })
+  $providerParams = @{
+    WorkerInstanceId = $env:DPI_T3_WORKER_PROVIDER_INSTANCE
+    CoordinatorInstanceId = $env:DPI_T3_COORDINATOR_PROVIDER_INSTANCE
+    PiWorkerInstanceId = $env:DPI_T3_PI_WORKER_PROVIDER_INSTANCE
+    DefaultModel = $(if ($env:DPI_COORDINATOR_MODEL) { $env:DPI_COORDINATOR_MODEL } else { 'gpt-5.6-sol' })
+    ReasoningEffort = $(if ($env:DPI_CODEX_REASONING_EFFORT) { $env:DPI_CODEX_REASONING_EFFORT } else { 'medium' })
+    ServiceTier = $(if ($env:DPI_CODEX_SERVICE_TIER) { $env:DPI_CODEX_SERVICE_TIER } else { 'fast' })
+    SubagentModel = $(if ($env:DPI_CODEX_SUBAGENT_MODEL) { $env:DPI_CODEX_SUBAGENT_MODEL } else { 'gpt-5.6-sol' })
+    SubagentReasoningEffort = $(if ($env:DPI_CODEX_SUBAGENT_REASONING_EFFORT) { $env:DPI_CODEX_SUBAGENT_REASONING_EFFORT } else { 'medium' })
+    WorkspaceBaseDirectory = $(if ($env:DPI_T3_WORKSPACE_BASE) { $env:DPI_T3_WORKSPACE_BASE } else { $env:DPI_START_DIRS })
+  }
+  if ($env:DPI_T3_PI_RUNTIME -eq '1' -and $piAvailable) {
+    $providerParams.EnablePiWorker = $true
+  }
+  $providerChanged = & (Join-Path $PSScriptRoot 'configure-t3-worker-provider.ps1') @providerParams
   if ($providerChanged -eq $true) {
     & t3 service restart | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'T3 service restart failed after configuring the worker Provider.' }

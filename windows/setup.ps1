@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
   [string]$StartDirectory,
-  [ValidateSet('faux', 'openrouter')]
+  [ValidateSet('faux', 'openrouter', 'deepseek', 'local')]
   [string]$Provider,
   [ValidateSet('127.0.0.1', '0.0.0.0')]
   [string]$HubHost,
@@ -74,7 +74,7 @@ $envLines = @(
   "DPI_T3_COORDINATOR_PROVIDER_INSTANCE=$coordinatorProvider",
   "DPI_NETWORK_DEVICE_ID=$(if ($env:DPI_NETWORK_DEVICE_ID) { $env:DPI_NETWORK_DEVICE_ID } else { 'local' })"
 )
-foreach ($name in @('DPI_DATA_ROOT_MAPPINGS_JSON','DPI_T3_WAITING_INTERVAL_MS','DPI_T3_PROJECT_INTERVAL_MS','DPI_T3_ENVIRONMENT_INTERVAL_MS')) {
+foreach ($name in @('DPI_DATA_ROOT_MAPPINGS_JSON','DPI_T3_WAITING_INTERVAL_MS','DPI_T3_PROJECT_INTERVAL_MS','DPI_T3_ENVIRONMENT_INTERVAL_MS','DEEPSEEK_API_KEY','DEEPSEEK_BASE_URL','DPI_T3_PI_RUNTIME','DPI_T3_PI_WORKER_PROVIDER_INSTANCE','DPI_T3_GEMINI_WORKER_PROVIDER_INSTANCE','DPI_ROLE_MODEL_MAP_JSON','DPI_FALLBACK_MODELS')) {
   $value = [Environment]::GetEnvironmentVariable($name, 'Process')
   if ($value) { $envLines += "$name=$value" }
 }

@@ -202,7 +202,7 @@ export interface ProjectMember {
   t3EnvironmentId?: string;
   threadId?: string;
   threadModel?: string;
-  threadRuntime?: "codex-app-server" | "t3";
+  threadRuntime?: "codex-app-server" | "t3" | "deepseek-harness" | "antigravity" | "pi-cli";
   /** Provider instance that owns the persisted thread. A missing value is treated
    * as unknown and must never be reused across a provider boundary. */
   threadProvider?: string;
@@ -649,7 +649,7 @@ export interface ProjectTaskAttempt {
 
 /** Correlates one fenced attempt with the execution owned by an external harness. */
 export interface ProjectTaskRuntimeBinding {
-  kind: "t3" | "codex-app-server" | "pi-durable";
+  kind: "t3" | "codex-app-server" | "pi-durable" | "deepseek-harness" | "antigravity" | "pi-cli";
   threadId: string;
   runId?: string;
   environmentId?: string;

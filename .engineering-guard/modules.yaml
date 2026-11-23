@@ -1,0 +1,31 @@
+schema_version: 1
+modules:
+  sdk:
+    paths:
+      - "apps/dpi-sdk/**"
+    depends_on: []
+    criticality: high
+  backend:
+    paths:
+      - "apps/dpi-backend/**"
+    depends_on:
+      - sdk
+    criticality: high
+  playground:
+    paths:
+      - "apps/dpi-playground/**"
+    depends_on:
+      - sdk
+      - backend
+    criticality: high
+  ops:
+    paths:
+      - "windows/**"
+      - "unix/**"
+      - "scripts/**"
+      - "*.md"
+      - ".env.example"
+      - ".gitignore"
+      - ".engineering-guard/**"
+    depends_on: []
+    criticality: normal
