@@ -103,6 +103,9 @@ test("project MCP exposes bounded read-only project tools without leaking anothe
         "create_durable_agent",
         "archive_durable_agent",
         "cancel_durable_task",
+        "remote_write_file",
+        "remote_apply_patch",
+        "remote_run_command",
       ],
     );
     assert.equal(
@@ -262,6 +265,7 @@ test("project MCP refreshes project membership changed by another process", asyn
         [
           "get_durable_project", "list_durable_agents", "list_durable_tasks",
           "list_durable_memories", "list_durable_artifacts", "remember_durable_fact",
+          "remote_write_file", "remote_apply_patch", "remote_run_command",
         ],
       );
       const coderTasks = await coderServer.handle({
@@ -615,7 +619,7 @@ test("project MCP Coordinator mode bootstraps before publishing its first tool l
     assert.equal(names.includes("initialize_durable_project"), false);
     const registry = new ProjectRegistry(database);
     const project = registry.list().find((candidate) => candidate.name === "automatic-tool-list-project");
-    assert.equal(project?.autonomyMode, "SUPERVISED");
+    assert.equal(project?.autonomyMode, "RESTRICTED_UNATTENDED");
     assert.equal(project?.templateId, "blank");
     assert.deepEqual(project?.templatePlan.map((item) => item.role), ["coordinator", "coder", "tester", "reviewer"]);
     registry.close();
@@ -660,7 +664,7 @@ test("project MCP automatically infers safe first-use defaults from an empty ini
     assert.equal(value.created, true);
     assert.equal(value.project.name, "automatic-web-project");
     assert.equal(value.project.templateId, "web");
-    assert.equal(value.project.autonomyMode, "SUPERVISED");
+    assert.equal(value.project.autonomyMode, "RESTRICTED_UNATTENDED");
     assert.deepEqual(value.boundSources.sort(), ["linux-home", "macos-home", "windows-workspace"]);
 
     const replay = await server.handle({

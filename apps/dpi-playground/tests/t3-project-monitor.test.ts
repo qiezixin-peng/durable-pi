@@ -34,7 +34,7 @@ test("T3 project monitor durably registers every active local project without a 
     const registry = new ProjectRegistry(durableDatabase);
     const project = registry.list().find((candidate) => candidate.name === "ArtCooker");
     assert.equal(project?.templateId, "web");
-    assert.equal(project?.autonomyMode, "SUPERVISED");
+    assert.equal(project?.autonomyMode, "RESTRICTED_UNATTENDED");
     assert.equal(project?.members[0]?.role, "coordinator");
     assert.equal(project?.members[0]?.permissionProfile, "READ_ONLY");
     registry.close();

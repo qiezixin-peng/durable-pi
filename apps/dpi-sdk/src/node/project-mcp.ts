@@ -21,6 +21,7 @@ import { ProjectHandoffStore } from "./handoffs.js";
 import { ProjectMemoryStore } from "./memories.js";
 import { ProjectRegistry } from "./projects.js";
 import { ProjectRelayStore } from "./relays.js";
+import { RemoteSshWorkspaceClient, type RemoteSshExecutor } from "./remote-ssh-workspace.js";
 import { ProjectReturnStore } from "./returns.js";
 import { dpiHome } from "./registry.js";
 import { ProjectTaskStore } from "./tasks.js";
@@ -63,6 +64,8 @@ export interface DurableProjectMcpOptions {
   geminiHome?: string;
   /** Optional DeepSeek Harness home directory ($DSH_HOME) for desktop login and session evidence discovery. */
   dshHome?: string;
+  /** Optional injectable SSH executor for controlled remote workspace operations. */
+  remoteSshExecutor?: RemoteSshExecutor;
   t3EnvironmentLister?: () => Promise<Array<{
     environmentId: string;
     status?: string;
@@ -277,7 +280,7 @@ const toolError = (error: unknown) => ({
 const BOOTSTRAP_TOOL = {
   name: "initialize_durable_project",
   description:
-    "MANDATORY first action for the first substantive user request in an unmanaged T3 workspace: call this automatically with {} before answering, without asking the user to initialize or choose routine settings. It idempotently registers only the current workspace, infers its template, uses SUPERVISED mode, and binds every configured read-only device data source. Explicit fields remain available for advanced overrides.",
+    "MANDATORY first action for the first substantive user request in an unmanaged T3 workspace: call this automatically with {} before answering, without asking the user to initialize or choose routine settings. It idempotently registers only the current workspace, infers its template, uses RESTRICTED_UNATTENDED mode (or DPI_DEFAULT_AUTONOMY_MODE) so delegated workers run inside their workspace/worktree sandbox without per-step approval prompts, and binds every configured read-only device data source. Explicit fields remain available for advanced overrides.",
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   inputSchema: {
     type: "object",
@@ -288,7 +291,7 @@ const BOOTSTRAP_TOOL = {
       autonomy_mode: {
         type: "string",
         enum: ["SUPERVISED", "AUTHORIZED_AUTONOMY", "RESTRICTED_UNATTENDED"],
-        default: "SUPERVISED",
+        default: "RESTRICTED_UNATTENDED",
       },
       coordinator_model: { type: "string", minLength: 1, maxLength: 160, default: DEFAULT_CODEX_MODEL },
       data_source_ids: {
@@ -732,6 +735,66 @@ const PROJECT_TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "remote_write_file",
+    description: "Atomically write UTF-8 text to a file inside a project-authorized remote SSH data source folder (requires writable role; sensitive paths and symlinks are blocked).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        source_id: { type: "string", minLength: 1, maxLength: 64 },
+        path: { type: "string", minLength: 1, maxLength: 2000 },
+        content: { type: "string", maxLength: 2000000 },
+        expected_sha256: { type: "string", minLength: 64, maxLength: 64 },
+        create_dirs: { type: "boolean", default: true },
+      },
+      required: ["source_id", "path", "content"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "remote_apply_patch",
+    description: "Apply exact search/replace edits to a UTF-8 file inside a project-authorized remote SSH data source folder (requires writable role).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        source_id: { type: "string", minLength: 1, maxLength: 64 },
+        path: { type: "string", minLength: 1, maxLength: 2000 },
+        edits: {
+          type: "array",
+          minItems: 1,
+          maxItems: 50,
+          items: {
+            type: "object",
+            properties: {
+              target: { type: "string", minLength: 1, maxLength: 200000 },
+              replacement: { type: "string", maxLength: 200000 },
+              replace_all: { type: "boolean", default: false },
+            },
+            required: ["target", "replacement"],
+            additionalProperties: false,
+          },
+        },
+        expected_sha256: { type: "string", minLength: 64, maxLength: 64 },
+      },
+      required: ["source_id", "path", "edits"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "remote_run_command",
+    description: "Run a bounded command over SSH inside a project-authorized remote folder without requiring any remote AI Agent. Read-only roles are restricted to safe inspection commands; writable roles can run build/test commands subject to safety policy.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        source_id: { type: "string", minLength: 1, maxLength: 64 },
+        cwd: { type: "string", maxLength: 2000, default: "" },
+        command: { type: "string", minLength: 1, maxLength: 2000 },
+        timeout_ms: { type: "integer", minimum: 1000, maximum: 300000, default: 60000 },
+      },
+      required: ["source_id", "command"],
+      additionalProperties: false,
+    },
+  },
 ] as const;
 
 const NON_COORDINATOR_PROJECT_TOOLS = new Set([
@@ -741,6 +804,9 @@ const NON_COORDINATOR_PROJECT_TOOLS = new Set([
   "list_durable_memories",
   "list_durable_artifacts",
   "remember_durable_fact",
+  "remote_write_file",
+  "remote_apply_patch",
+  "remote_run_command",
 ]);
 
 /** Project-scoped MCP facade used by T3 threads. Every mutation is bounded, idempotent and role checked. */
@@ -827,11 +893,18 @@ export class DurableProjectMcpServer {
               const initialized = await this.initializeProject({});
               if (!("isError" in initialized && initialized.isError === true)) context = this.currentContext();
             }
+            const canWriteRemote = Boolean(
+              context &&
+                (coordinator(context.member) || memberRoleCanWrite(context.member.role, context.member.permissionProfile)),
+            );
             const tools = !context
               ? [DATA_SOURCE_OPTIONS_TOOL, BOOTSTRAP_TOOL]
-              : coordinator(context.member)
-                ? [...PROJECT_TOOLS]
-                : PROJECT_TOOLS.filter((tool) => NON_COORDINATOR_PROJECT_TOOLS.has(tool.name));
+              : (coordinator(context.member)
+                  ? [...PROJECT_TOOLS]
+                  : PROJECT_TOOLS.filter((tool) => NON_COORDINATOR_PROJECT_TOOLS.has(tool.name))
+                ).filter((tool) =>
+                  canWriteRemote || (tool.name !== "remote_write_file" && tool.name !== "remote_apply_patch"),
+                );
           return {
             jsonrpc: "2.0",
             id,
@@ -895,8 +968,11 @@ export class DurableProjectMcpServer {
       const templateId = requestedTemplateId === "auto" ? inferProjectTemplate(cwd) : requestedTemplateId;
       const template = durableProjectTemplate(templateId);
       if (!template) throw Error("Unknown project template");
+      const defaultAutonomyMode =
+        (this.options.env?.DPI_DEFAULT_AUTONOMY_MODE ?? process.env.DPI_DEFAULT_AUTONOMY_MODE)?.trim() ||
+        "RESTRICTED_UNATTENDED";
       const autonomyMode = args.autonomy_mode === undefined
-        ? "SUPERVISED"
+        ? defaultAutonomyMode
         : requiredText(args.autonomy_mode, "autonomy_mode", 32);
       if (!["SUPERVISED", "AUTHORIZED_AUTONOMY", "RESTRICTED_UNATTENDED"].includes(autonomyMode))
         throw Error("Invalid autonomy_mode");
@@ -2400,6 +2476,105 @@ export class DurableProjectMcpServer {
             }, member.id, targetMemberId);
             return toolResult({ ...cancelled, runtimeCancellation: { status: "FAILED", error: message.slice(0, 500) } });
           }
+        }
+        case "remote_write_file": {
+          const canWrite = coordinator(member) || memberRoleCanWrite(member.role, member.permissionProfile);
+          if (!canWrite) {
+            throw Error("remote_write_file requires a writable role");
+          }
+          const sourceId = requiredText(args.source_id, "source_id", 64);
+          const relPath = requiredText(args.path, "path", 2_000);
+          if (typeof args.content !== "string") throw Error("content must be a string");
+          const expectedSha256 = args.expected_sha256 === undefined ? undefined : requiredText(args.expected_sha256, "expected_sha256", 64);
+          const createDirs = args.create_dirs === undefined ? true : Boolean(args.create_dirs);
+          const client = new RemoteSshWorkspaceClient({
+            catalogPath: this.dataSourceCatalogPath,
+            ...(this.options.remoteSshExecutor ? { sshExecutor: this.options.remoteSshExecutor } : {}),
+          });
+          const written = await client.writeFile({
+            projectId: project.id,
+            sourceId,
+            path: relPath,
+            content: args.content,
+            createDirs,
+            ...(expectedSha256 ? { expectedSha256 } : {}),
+          });
+          this.projects.event(project.id, "remote.workspace.write", {
+            sourceId,
+            path: written.path,
+            sizeBytes: written.sizeBytes,
+            sha256: written.sha256,
+            created: written.created,
+          }, member.id, member.id);
+          return toolResult(written);
+        }
+        case "remote_apply_patch": {
+          const canWrite = coordinator(member) || memberRoleCanWrite(member.role, member.permissionProfile);
+          if (!canWrite) {
+            throw Error("remote_apply_patch requires a writable role");
+          }
+          const sourceId = requiredText(args.source_id, "source_id", 64);
+          const relPath = requiredText(args.path, "path", 2_000);
+          if (!Array.isArray(args.edits) || args.edits.length === 0) throw Error("edits must be a non-empty array");
+          const edits = args.edits.map((item) => {
+            const hunk = object(item, "patch hunk");
+            const target = requiredText(hunk.target, "target", 200_000);
+            if (typeof hunk.replacement !== "string") throw Error("replacement must be a string");
+            return {
+              target,
+              replacement: hunk.replacement,
+              ...(hunk.replace_all !== undefined ? { replaceAll: Boolean(hunk.replace_all) } : {}),
+            };
+          });
+          const expectedSha256 = args.expected_sha256 === undefined ? undefined : requiredText(args.expected_sha256, "expected_sha256", 64);
+          const client = new RemoteSshWorkspaceClient({
+            catalogPath: this.dataSourceCatalogPath,
+            ...(this.options.remoteSshExecutor ? { sshExecutor: this.options.remoteSshExecutor } : {}),
+          });
+          const patched = await client.applyPatch({
+            projectId: project.id,
+            sourceId,
+            path: relPath,
+            edits,
+            ...(expectedSha256 ? { expectedSha256 } : {}),
+          });
+          this.projects.event(project.id, "remote.workspace.patch", {
+            sourceId,
+            path: patched.path,
+            sizeBytes: patched.sizeBytes,
+            sha256: patched.sha256,
+            replacementsApplied: patched.replacementsApplied,
+          }, member.id, member.id);
+          return toolResult(patched);
+        }
+        case "remote_run_command": {
+          const canWrite = coordinator(member) || memberRoleCanWrite(member.role, member.permissionProfile);
+          const sourceId = requiredText(args.source_id, "source_id", 64);
+          const cwd = args.cwd === undefined ? "" : String(args.cwd);
+          const command = requiredText(args.command, "command", 2_000);
+          const timeoutMs = args.timeout_ms === undefined ? undefined : Number(args.timeout_ms);
+          const client = new RemoteSshWorkspaceClient({
+            catalogPath: this.dataSourceCatalogPath,
+            ...(this.options.remoteSshExecutor ? { sshExecutor: this.options.remoteSshExecutor } : {}),
+          });
+          const ran = await client.runCommand({
+            projectId: project.id,
+            sourceId,
+            cwd,
+            command,
+            readOnly: !canWrite,
+            ...(timeoutMs !== undefined && Number.isFinite(timeoutMs) ? { timeoutMs } : {}),
+          });
+          this.projects.event(project.id, "remote.workspace.command", {
+            sourceId,
+            cwd: ran.cwd,
+            command: ran.command,
+            readOnly: ran.readOnly,
+            exitCode: ran.exitCode,
+            timedOut: ran.timedOut,
+            durationMs: ran.durationMs,
+          }, member.id, member.id);
+          return toolResult(ran);
         }
         default:
           return toolError(`Unknown Durable Pi tool: ${name}`);

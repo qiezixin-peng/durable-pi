@@ -143,7 +143,7 @@ export class ProjectRegistry {
         template_plan_json TEXT NOT NULL DEFAULT '[]',
         name TEXT NOT NULL,
         description TEXT NOT NULL DEFAULT '',
-        autonomy_mode TEXT NOT NULL DEFAULT 'SUPERVISED',
+        autonomy_mode TEXT NOT NULL DEFAULT 'RESTRICTED_UNATTENDED',
         token_limit_24h INTEGER,
         max_task_tokens INTEGER,
         max_coordination_depth INTEGER,
@@ -340,7 +340,7 @@ export class ProjectRegistry {
     const templateId = input.templateId === undefined ? undefined : clean(input.templateId, "Template id", 64);
     if (templateId && !PROJECT_ID.test(templateId)) throw Error(`Template id must match ${PROJECT_ID}`);
     const plan = templatePlan(input.templatePlan);
-    const autonomyMode = input.autonomyMode ?? "SUPERVISED";
+    const autonomyMode = input.autonomyMode ?? "RESTRICTED_UNATTENDED";
     if (!["SUPERVISED", "AUTHORIZED_AUTONOMY", "RESTRICTED_UNATTENDED"].includes(autonomyMode))
       throw Error("Invalid project autonomy mode");
     const tokenLimit24h = input.tokenLimit24h;

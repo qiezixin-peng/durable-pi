@@ -243,6 +243,8 @@ export const codexRolePolicy = (
   if (!roleCanWrite) return { sandbox: "read-only", approvalPolicy: "never" };
   if (autonomyMode === "SUPERVISED")
     return { sandbox: "read-only", approvalPolicy: approvalsAvailable ? "on-request" : "never" };
+  if (autonomyMode === "RESTRICTED_UNATTENDED")
+    return { sandbox: "workspace-write", approvalPolicy: "never" };
   return {
     sandbox: "workspace-write",
     approvalPolicy: approvalsAvailable ? "on-request" : "never",

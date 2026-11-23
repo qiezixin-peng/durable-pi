@@ -182,6 +182,10 @@ test("Codex execution policy separates role from explicit permission profile", (
     sandbox: "read-only",
     approvalPolicy: "on-request",
   });
+  assert.deepEqual(codexRolePolicy("RESTRICTED_UNATTENDED", "coder", true, "WORKSPACE_WRITE"), {
+    sandbox: "workspace-write",
+    approvalPolicy: "never",
+  });
   assert.equal(memberPermissionWithinTemplate("researcher", "ROLE_DEFAULT", "coder", "ROLE_DEFAULT"), false);
   assert.equal(memberPermissionWithinTemplate("researcher", "ROLE_DEFAULT", "reviewer", "ROLE_DEFAULT"), true);
   assert.equal(memberPermissionWithinTemplate("coder", "ROLE_DEFAULT", "reviewer", "ROLE_DEFAULT"), true);
@@ -225,7 +229,7 @@ test("project worker claims a task, sends it to Pi once and commits the answer",
     });
     await new DpiClient(backend.base, token).agent(session.id, "main").configure({ readOnly: true });
     devices.upsert({ id: "box-a", url: backend.base, token, source: "ui" });
-    projects.create({ id: "alpha", name: "Alpha" });
+    projects.create({ id: "alpha", name: "Alpha", autonomyMode: "SUPERVISED" });
     projects.addMember("alpha", {
       id: "coder",
       deviceId: "box-a",

@@ -54,7 +54,7 @@ test("projects isolate members, messages and event history", async () => {
     );
     assert.equal(registry.get("rolled-back"), undefined, "project and audit events commit atomically");
     assert.equal(alpha.members.length, 0);
-    assert.equal(alpha.autonomyMode, "SUPERVISED");
+    assert.equal(alpha.autonomyMode, "RESTRICTED_UNATTENDED");
     assert.equal(alpha.maxTaskTokens, 12_000);
     assert.equal(alpha.maxCoordinationDepth, 4);
     assert.equal(alpha.maxDelegatedTasksPerTurn, 6);

@@ -147,7 +147,7 @@ test("hub: registry from YAML, monitoring, token-injecting proxy, guard, mux, of
     ).json();
     assert.equal(project.id, "project-one");
     assert.equal(project.templateId, "web");
-    assert.equal(project.autonomyMode, "SUPERVISED");
+    assert.equal(project.autonomyMode, "RESTRICTED_UNATTENDED");
     assert.equal(project.maxConcurrentTasks, 3);
     assert.equal(project.maxActiveTasks, 48);
     assert.deepEqual(project.templatePlan.map((item: { role: string }) => item.role), ["coordinator", "architect", "coder", "tester", "reviewer"]);
