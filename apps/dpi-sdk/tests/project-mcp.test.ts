@@ -654,6 +654,11 @@ test("project MCP automatically infers safe first-use defaults from an empty ini
       jsonrpc: "2.0", id: "auto-init", method: "tools/call",
       params: { name: "initialize_durable_project", arguments: {} },
     });
+    assert.notEqual(
+      (initialized?.result as { isError?: boolean })?.isError,
+      true,
+      (initialized?.result as { content?: Array<{ text: string }> })?.content?.[0]?.text,
+    );
     const value = (initialized?.result as {
       structuredContent: {
         created: boolean;
@@ -680,14 +685,21 @@ test("project MCP automatically infers safe first-use defaults from an empty ini
 test("project MCP recognizes application markers in conventional nested roots", async () => {
   const { root, database } = await fixture();
   const workspace = join(root, "nested-web-project");
+  const catalog = join(root, "nested-data-sources.json");
   await mkdir(join(workspace, "frontend"), { recursive: true });
   await writeFile(join(workspace, "frontend", "package.json"), JSON.stringify({ private: true }));
-  const server = new DurableProjectMcpServer({ cwd: workspace, databasePath: database });
+  await writeFile(catalog, JSON.stringify({ version: 1, sources: [] }));
+  const server = new DurableProjectMcpServer({ cwd: workspace, databasePath: database, dataSourceCatalogPath: catalog });
   try {
     const initialized = await server.handle({
       jsonrpc: "2.0", id: "nested-auto-init", method: "tools/call",
       params: { name: "initialize_durable_project", arguments: {} },
     });
+    assert.notEqual(
+      (initialized?.result as { isError?: boolean })?.isError,
+      true,
+      (initialized?.result as { content?: Array<{ text: string }> })?.content?.[0]?.text,
+    );
     const project = (initialized?.result as {
       structuredContent: { project: { templateId: string; templatePlan: Array<{ role: string }> } };
     }).structuredContent.project;
@@ -934,6 +946,7 @@ test("project MCP idempotently initializes the current T3 workspace and binds se
         device: "linux",
         environmentId: "env-device-b",
         verifiedModels: ["gpt-5.6-sol"],
+        protectedInteractiveModels: [],
         status: "reachable",
         lastReachedAt: "2026-11-18T06:24:00.304Z",
       }],
@@ -995,8 +1008,10 @@ test("project MCP rolls back a failed first-time initialization so onboarding ca
 test("project MCP materializes only pre-authorized team roles and reuses them idempotently", async () => {
   const { root, database } = await fixture();
   const workspace = join(root, "planned-team-project");
+  const catalog = join(root, "planned-team-data-sources.json");
   await mkdir(workspace);
-  const server = new DurableProjectMcpServer({ cwd: workspace, databasePath: database });
+  await writeFile(catalog, JSON.stringify({ version: 1, sources: [] }));
+  const server = new DurableProjectMcpServer({ cwd: workspace, databasePath: database, dataSourceCatalogPath: catalog });
   try {
     await server.handle({
       jsonrpc: "2.0", id: "initialize-team", method: "tools/call", params: {
@@ -1011,6 +1026,11 @@ test("project MCP materializes only pre-authorized team roles and reuses them id
     });
     const first = await materialize("team-coder", "coder");
     const replay = await materialize("team-coder-replay", "coder");
+    assert.notEqual(
+      (first?.result as { isError?: boolean })?.isError,
+      true,
+      (first?.result as { content?: Array<{ text: string }> })?.content?.[0]?.text,
+    );
     const firstValue = (first?.result as {
       structuredContent: { agent: { id: string; role: string; permissionProfile: string }; replayed: boolean; workspaceStrategy: string; automaticWorktreeDecision: string };
     }).structuredContent;
@@ -1043,7 +1063,9 @@ test("project MCP materializes only pre-authorized team roles and reuses them id
 test("project MCP automatically materializes a write-capable planned Agent in an isolated clean Git worktree", async () => {
   const { root, database } = await fixture();
   const repository = join(root, "worktree-project");
+  const catalog = join(root, "worktree-data-sources.json");
   await mkdir(repository);
+  await writeFile(catalog, JSON.stringify({ version: 1, sources: [] }));
   await writeFile(join(repository, "README.md"), "# Worktree project\n");
   execFileSync("git", ["init", repository], { stdio: "ignore" });
   execFileSync("git", ["-C", repository, "add", "README.md"], { stdio: "ignore" });
@@ -1051,6 +1073,7 @@ test("project MCP automatically materializes a write-capable planned Agent in an
   const server = new DurableProjectMcpServer({
     cwd: repository,
     databasePath: database,
+    dataSourceCatalogPath: catalog,
     worktreeRoot: join(root, "managed-worktrees"),
   });
   try {
@@ -1066,6 +1089,11 @@ test("project MCP automatically materializes a write-capable planned Agent in an
         arguments: { request_id: "worktree-coder", role: "coder" },
       },
     });
+    assert.notEqual(
+      (response?.result as { isError?: boolean })?.isError,
+      true,
+      (response?.result as { content?: Array<{ text: string }> })?.content?.[0]?.text,
+    );
     const value = (response?.result as {
       structuredContent: {
         agent: { cwd: string; permissionProfile: string };
@@ -1696,7 +1724,7 @@ test("project MCP prepares divergent integration only in an isolated temporary A
   }
 });
 
-test("project MCP exposes local Gemini/DeepSeek providers, supports role defaults and blocks remote inheritance", async () => {
+test("project MCP exposes protected Antigravity and Durable DeepSeek, inherits role defaults and filters remote models", async () => {
   const root = await mkdtemp(join(process.env.DPI_TEST_TEMP ?? tmpdir(), "durable-pi-local-models-mcp-"));
   const workspace = join(root, "workspace");
   await mkdir(workspace);
@@ -1772,7 +1800,15 @@ test("project MCP exposes local Gemini/DeepSeek providers, supports role default
     });
     const localSummary = (listed?.result as {
       structuredContent: {
-        providers: Array<{ provider: string; runtime: string; configured: boolean; authSource: string; remoteAllowedByDefault: boolean }>;
+        providers: Array<{
+          provider: string;
+          runtime: string;
+          configured: boolean;
+          authSource: string;
+          remoteAllowedByDefault: boolean;
+          durableDelegationAllowed: boolean;
+          interactionMode: string;
+        }>;
         roleModelMap: Record<string, string>;
       };
     }).structuredContent;
@@ -1780,8 +1816,11 @@ test("project MCP exposes local Gemini/DeepSeek providers, supports role default
     assert.equal(JSON.stringify(localSummary).includes("secret-cli-oauth"), false);
     assert.equal(localSummary.providers.find((p) => p.provider === "google")?.authSource, "antigravity-cli-account");
     assert.equal(localSummary.providers.find((p) => p.provider === "google")?.runtime, "antigravity");
+    assert.equal(localSummary.providers.find((p) => p.provider === "google")?.durableDelegationAllowed, false);
+    assert.equal(localSummary.providers.find((p) => p.provider === "google")?.interactionMode, "direct-t3-only");
     assert.equal(localSummary.providers.find((p) => p.provider === "deepseek")?.authSource, "dsh-account");
     assert.equal(localSummary.providers.find((p) => p.provider === "deepseek")?.runtime, "deepseek-harness");
+    assert.equal(localSummary.providers.find((p) => p.provider === "deepseek")?.durableDelegationAllowed, true);
     assert.equal(localSummary.providers.every((p) => p.remoteAllowedByDefault === false), true);
     assert.deepEqual(localSummary.roleModelMap, { reviewer: "deepseek/deepseek-flash" });
 
@@ -1801,8 +1840,8 @@ test("project MCP exposes local Gemini/DeepSeek providers, supports role default
     assert.equal(reviewer.model, "deepseek/deepseek-flash");
     assert.equal(reviewer.permissionProfile, "READ_ONLY");
 
-    // Explicit Gemini provider/model on coder
-    const materializedCoder = await server.handle({
+    // Protected Antigravity cannot be materialized as a Durable worker.
+    const protectedCoder = await server.handle({
       jsonrpc: "2.0", id: "mat-coder", method: "tools/call",
       params: {
         name: "materialize_durable_agent",
@@ -1815,11 +1854,29 @@ test("project MCP exposes local Gemini/DeepSeek providers, supports role default
         },
       },
     });
+    assert.equal((protectedCoder?.result as { isError: boolean }).isError, true);
+    assert.match(
+      (protectedCoder?.result as { content: Array<{ text: string }> }).content[0]!.text,
+      /protected interactive Provider/i,
+    );
+
+    // Without an explicit override, a child inherits the Coordinator model.
+    const materializedCoder = await server.handle({
+      jsonrpc: "2.0", id: "mat-coder-inherited", method: "tools/call",
+      params: {
+        name: "materialize_durable_agent",
+        arguments: {
+          request_id: "req-coder-inherited",
+          role: "coder",
+          workspace_strategy: "shared",
+        },
+      },
+    });
     const coder = (materializedCoder?.result as {
       structuredContent: { agent: { id: string; executor: string; model: string; permissionProfile: string } };
     }).structuredContent.agent;
-    assert.equal(coder.executor, "pi");
-    assert.equal(coder.model, "google/gemini-2.5-pro");
+    assert.equal(coder.executor, "codex");
+    assert.equal(coder.model, "gpt-6.1-sol");
     assert.equal(coder.permissionProfile, "WORKSPACE_WRITE");
 
     // Unmapped role without explicit model keeps default Codex coordinator model
@@ -1859,7 +1916,7 @@ test("project MCP exposes local Gemini/DeepSeek providers, supports role default
     assert.equal(tempAgent.temporary, true);
     assert.equal(tempAgent.permissionProfile, "READ_ONLY");
 
-    // Remote template MUST reject unverified Gemini/DeepSeek models
+    // Antigravity remains protected even if a remote target were to advertise it.
     const blockedRemoteTemp = await server.handle({
       jsonrpc: "2.0", id: "temp-remote-blocked", method: "tools/call",
       params: {
@@ -1876,7 +1933,7 @@ test("project MCP exposes local Gemini/DeepSeek providers, supports role default
     assert.equal((blockedRemoteTemp?.result as { isError: boolean }).isError, true);
     assert.match(
       (blockedRemoteTemp?.result as { content: Array<{ text: string }> }).content[0]!.text,
-      /strictly locally via Google Antigravity OAuth/,
+      /protected interactive Provider/i,
     );
   } finally {
     server.close();

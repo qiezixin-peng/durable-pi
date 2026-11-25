@@ -290,6 +290,8 @@ test("inspectLocalModelProviders discovers real Antigravity and DeepSeek Harness
     assert.equal(google.apiKeyForbidden, true);
     assert.equal(google.authSource, "antigravity-cli-account");
     assert.equal(google.remoteAllowedByDefault, false);
+    assert.equal(google.durableDelegationAllowed, false);
+    assert.equal(google.interactionMode, "direct-t3-only");
     assert.deepEqual(google.verifiedModels, ["google/gemini-4-neon"]);
 
     const verifiedNeon = google.models.find((m) => m.id === "gemini-4-neon")!;
@@ -311,6 +313,8 @@ test("inspectLocalModelProviders discovers real Antigravity and DeepSeek Harness
     assert.equal(deepseek.runtime, "deepseek-harness");
     assert.equal(deepseek.authMode, "deepseek-harness-account");
     assert.equal(deepseek.authSource, "dsh-account");
+    assert.equal(deepseek.durableDelegationAllowed, true);
+    assert.equal(deepseek.interactionMode, "durable-worker");
     assert.deepEqual(deepseek.verifiedModels, ["deepseek/deepseek-flash"]);
 
     const verifiedFlash = deepseek.models.find((m) => m.id === "deepseek-flash")!;

@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-  [string]$WorkerInstanceId = 'codex_durable_worker',
+  [string]$WorkerInstanceId = 'codex',
   [string]$CoordinatorInstanceId = 'codex_durable_coordinator',
   [string]$PiWorkerInstanceId = 'pi_durable_worker',
   [switch]$EnablePiWorker,
@@ -10,14 +10,23 @@ param(
   [string]$SubagentModel = 'gpt-5.6-sol',
   [string]$SubagentReasoningEffort = 'medium',
   [string]$WorkspaceBaseDirectory = '',
+  [string]$AntigravityInstanceId = 'antigravity',
+  [string]$AntigravityBinaryPath = '',
   [string]$SettingsPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
-foreach ($instanceId in @($WorkerInstanceId, $CoordinatorInstanceId, $PiWorkerInstanceId)) {
+foreach ($instanceId in @($WorkerInstanceId, $CoordinatorInstanceId, $PiWorkerInstanceId, $AntigravityInstanceId)) {
   if ($instanceId -notmatch '^[a-zA-Z][a-zA-Z0-9_-]{0,63}$') {
     throw 'T3 Durable Pi provider instance id is invalid.'
   }
+}
+
+function Remove-ProviderInstance([string]$InstanceId) {
+  $existing = $settings.providerInstances.PSObject.Properties[$InstanceId]
+  if (-not $existing) { return $false }
+  $settings.providerInstances.PSObject.Properties.Remove($InstanceId)
+  return $true
 }
 foreach ($value in @($DefaultModel, $ReasoningEffort, $ServiceTier, $SubagentModel, $SubagentReasoningEffort)) {
   if ([string]::IsNullOrWhiteSpace($value) -or $value -notmatch '^[a-zA-Z0-9._-]{1,160}$') {
@@ -64,8 +73,38 @@ $modelArgs = "-c model_reasoning_effort=$ReasoningEffort -c service_tier=$Servic
 $workerArgs = "$modelArgs -c features.multi_agent=false -c features.multi_agent_v2=false -c mcp_servers.anode.enabled=false -c mcp_servers.durable-pi.enabled=false -c mcp_servers.durable-pi-auto.enabled=false -c mcp_servers.rea.enabled=false -c mcp_servers.reaper.enabled=false"
 $coordinatorArgs = '-c features.multi_agent=false -c features.multi_agent_v2=false -c mcp_servers.anode.enabled=false -c mcp_servers.durable-pi.enabled=false -c mcp_servers.durable-pi-auto.enabled=true -c mcp_servers.durable-data.enabled=false -c mcp_servers.rea.enabled=false -c mcp_servers.reaper.enabled=false'
 $coordinatorArgs = "$modelArgs $coordinatorArgs"
-$workerChanged = Set-ProviderInstance $WorkerInstanceId 'Codex · Durable Worker' $workerArgs
+$workerChanged = if ($WorkerInstanceId -eq 'codex') {
+  # T3 already exposes its built-in Codex provider. Reuse it for workers and
+  # remove the legacy duplicate entry; the Coordinator remains isolated.
+  Remove-ProviderInstance 'codex_durable_worker'
+} else {
+  Set-ProviderInstance $WorkerInstanceId 'Codex · Durable Worker' $workerArgs
+}
 $coordinatorChanged = Set-ProviderInstance $CoordinatorInstanceId 'Codex · Durable Coordinator' $coordinatorArgs
+$antigravityChanged = $false
+if (-not [string]::IsNullOrWhiteSpace($AntigravityBinaryPath)) {
+  $resolvedAntigravityBinary = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($AntigravityBinaryPath))
+  if (-not (Test-Path -LiteralPath $resolvedAntigravityBinary -PathType Leaf)) {
+    throw "Antigravity CLI binary or wrapper does not exist: $resolvedAntigravityBinary"
+  }
+  $desiredAntigravity = [ordered]@{
+    driver = 'antigravity'
+    displayName = 'Antigravity CLI (Gemini)'
+    enabled = $true
+    config = [ordered]@{
+      authMethod = 'oauth-personal'
+      binaryPath = $resolvedAntigravityBinary
+    }
+  }
+  $existingAntigravity = $settings.providerInstances.PSObject.Properties[$AntigravityInstanceId]
+  $existingAntigravityJson = if ($existingAntigravity) { $existingAntigravity.Value | ConvertTo-Json -Depth 20 -Compress } else { '' }
+  $desiredAntigravityJson = $desiredAntigravity | ConvertTo-Json -Depth 20 -Compress
+  $antigravityChanged = $existingAntigravityJson -ne $desiredAntigravityJson
+  if ($antigravityChanged) {
+    if ($existingAntigravity) { $settings.providerInstances.PSObject.Properties.Remove($AntigravityInstanceId) }
+    $settings.providerInstances | Add-Member -NotePropertyName $AntigravityInstanceId -NotePropertyValue ([pscustomobject]$desiredAntigravity)
+  }
+}
 $piWorkerChanged = $false
 if ($EnablePiWorker) {
   $piWorkerChanged = Set-ProviderInstance $PiWorkerInstanceId 'Pi · Durable Worker (DeepSeek)' '--no-mcp' 'pi'
@@ -95,7 +134,7 @@ if (-not [string]::IsNullOrWhiteSpace($WorkspaceBaseDirectory)) {
   if ($existingWorkspace) { $settings.PSObject.Properties.Remove('addProjectBaseDirectory') }
   $settings | Add-Member -NotePropertyName addProjectBaseDirectory -NotePropertyValue $resolvedWorkspace
 }
-$changed = $workerChanged -or $coordinatorChanged -or $piWorkerChanged -or $defaultChanged -or $workspaceChanged
+$changed = $workerChanged -or $coordinatorChanged -or $antigravityChanged -or $piWorkerChanged -or $defaultChanged -or $workspaceChanged
 if (-not $changed) {
   Write-Output $false
   exit 0

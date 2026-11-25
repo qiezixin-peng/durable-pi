@@ -68,6 +68,8 @@ export interface LocalProviderInspection {
     | "antigravity-cli-account"
     | "none";
   remoteAllowedByDefault: false;
+  durableDelegationAllowed: boolean;
+  interactionMode: "direct-t3-only" | "durable-worker";
   verifiedModels: string[];
   models: LocalProviderModelSpec[];
 }
@@ -763,6 +765,8 @@ export function inspectLocalModelProviders(options: {
         configured: agyStatus.authenticated,
         authSource: agyStatus.authSource,
         remoteAllowedByDefault: false,
+        durableDelegationAllowed: false,
+        interactionMode: "direct-t3-only",
         verifiedModels: googleModels.filter((m) => m.verified).map((m) => m.qualifiedId),
         models: googleModels,
       },
@@ -784,6 +788,8 @@ export function inspectLocalModelProviders(options: {
           deepseekHasPiAuth,
         authSource: deepseekAuthSource,
         remoteAllowedByDefault: false,
+        durableDelegationAllowed: true,
+        interactionMode: "durable-worker",
         verifiedModels: deepseekModels.filter((m) => m.verified).map((m) => m.qualifiedId),
         models: deepseekModels,
       },

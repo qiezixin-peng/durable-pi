@@ -23,8 +23,14 @@ npm run dev                          # Vite middleware with hot reload (no build
 | `DPI_NETWORK_FILE` | `dpi-network.yaml`, found by walking up from the app | devices seeded into the registry at boot |
 | `DPI_TASK_WORKER` | `1` | set to `0` to disable automatic `agent.message` task dispatch |
 | `DPI_T3_RUNTIME` | unset (`windows/start-local.ps1` defaults to `1`) | set to `1` to route write-capable, non-Coordinator Codex members through T3 with an autonomy-bounded runtime mode; set to `0` to disable |
-| `DPI_T3_WORKER_PROVIDER_INSTANCE` | `codex_durable_worker` | dedicated T3 Codex Provider for worker Agents; the Windows launcher creates it with the coordination MCP disabled |
+| `DPI_T3_WORKER_PROVIDER_INSTANCE` | `codex` | built-in T3 Codex Provider reused for worker Agents; the isolated Durable Coordinator remains a separate Provider |
 | `DPI_T3_COORDINATOR_PROVIDER_INSTANCE` | `codex_durable_coordinator` | read-only T3 Codex Provider for visible Coordinator result handling; retains Durable Pi coordination tools |
+
+T3 exposes two deliberately isolated orchestration domains. Codex/DeepSeek projects use Durable Pi for task records,
+leases, permissions, cross-device routing and visible child sessions; children inherit their parent/template model unless
+the user selects another Durable-eligible Provider. Antigravity is a protected interactive Provider: open it directly
+in T3 and let its official runtime perform native task splitting and child-Agent management. Durable Pi never invokes
+Antigravity, never selects it as a fallback, and never sends it work from Codex, DeepSeek or a remote scheduler.
 
 The device backend supports `DPI_PROVIDER=faux`, `openrouter`, or `openai`. `openai` uses Pi's OAuth credential at `~/.pi/agent/auth.json` by default (`DPI_AUTH_FILE` overrides it), so Sign in with ChatGPT tokens can be shared with the embedded Pi Durable runtime without copying a token into project files. Authenticate through Pi's `/login openai`; never paste the token into the Hub UI or commit `auth.json`.
 

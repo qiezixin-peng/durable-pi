@@ -770,7 +770,7 @@ test("T3 worker reattaches an expired attempt instead of launching duplicate wor
     });
     const expiredLease = tasks.claim("t3-recovery", "dead-worker", { leaseMs: 1_000 })!;
     tasks.bindRuntime(expiredLease.id, "dead-worker", expiredLease.fenceEpoch, {
-      kind: "t3", threadId: "existing-thread", runId: "existing-run", provider: "codex_durable_worker", model: "gpt-6-astra",
+      kind: "t3", threadId: "existing-thread", runId: "existing-run", provider: "codex", model: "gpt-6-astra",
     });
     tasks.db.prepare("UPDATE project_tasks SET lease_until=? WHERE id=?").run(Date.now() - 1, expiredLease.id);
 
@@ -2192,7 +2192,7 @@ test("worker aborts and pauses a Codex turn when its per-task token limit is rea
   }
 });
 
-test("Local Google Antigravity workers run via AntigravityClient and local DeepSeek write/read-only workers run via DeepSeekHarnessClient (dsh headless --json) with durable execution receipts", async () => {
+test("Durable workers reject protected Antigravity members without invoking OAuth while DeepSeek workers remain available", async () => {
   const t = await tempStore();
   const projects = new ProjectRegistry(join(t.root, "hub", "projects.sqlite"));
   const tasks = new ProjectTaskStore(projects.path);
@@ -2201,7 +2201,6 @@ test("Local Google Antigravity workers run via AntigravityClient and local DeepS
   const usage = new ProjectUsageStore(projects.path);
   const toolCalls = new ProjectToolCallStore(projects.path);
   const providerHealth = new ProviderHealthStore(projects.path);
-  const antigravityCalls: Array<{ modelId: string; readOnly?: boolean; cwd: string }> = [];
   const dshCalls: Array<{
     modelId: string;
     permissionMode: string;
@@ -2210,16 +2209,6 @@ test("Local Google Antigravity workers run via AntigravityClient and local DeepS
     sessionId?: string;
   }> = [];
   try {
-    const geminiHome = join(t.root, ".gemini");
-    execFileSync(process.execPath, [
-      "-e",
-      `require("node:fs").mkdirSync(${JSON.stringify(join(geminiHome, "antigravity-cli"))}, { recursive: true })`,
-    ]);
-    await writeFile(
-      join(geminiHome, "antigravity-cli", "acp_token.json"),
-      JSON.stringify({ refresh_token: "test-agy-cli-oauth-token" }),
-      "utf8",
-    );
     const dshHome = join(t.root, ".dsh");
     execFileSync(process.execPath, ["-e", `require("node:fs").mkdirSync(${JSON.stringify(dshHome)}, { recursive: true })`]);
     await writeFile(
@@ -2289,32 +2278,8 @@ test("Local Google Antigravity workers run via AntigravityClient and local DeepS
       providerHealth,
       useT3Runtime: true,
       t3PiWorkerProviderInstanceId: "pi_durable_worker",
-      geminiHome,
       dshHome,
       localProviderEnv: {},
-      antigravityClientFactory: () => ({
-        async runTurn(input) {
-          antigravityCalls.push({
-            modelId: input.modelId,
-            readOnly: input.readOnly,
-            cwd: input.cwd,
-          });
-          return {
-            sessionId: "agy-session-1",
-            text: "ANTIGRAVITY_OAUTH_OK",
-            usage: {
-              inputTokens: 100,
-              cachedInputTokens: 10,
-              cacheWriteInputTokens: 0,
-              outputTokens: 50,
-              reasoningOutputTokens: 20,
-              totalTokens: 150,
-              costUsd: null,
-            },
-            toolEvents: [],
-          };
-        },
-      }),
       deepSeekHarnessClientFactory: () => ({
         async runTurn(input) {
           dshCalls.push({
@@ -2376,11 +2341,6 @@ test("Local Google Antigravity workers run via AntigravityClient and local DeepS
     assert.equal(await worker.runOnce("local-pi"), true);
     assert.equal(await worker.runOnce("local-pi"), true);
 
-    assert.deepEqual(antigravityCalls, [{
-      modelId: "gemini-4-neon",
-      readOnly: false,
-      cwd: t.work,
-    }]);
     assert.deepEqual(
       [...dshCalls].sort((a, b) => a.modelId.localeCompare(b.modelId)),
       [
@@ -2400,12 +2360,11 @@ test("Local Google Antigravity workers run via AntigravityClient and local DeepS
     );
 
     const geminiTask = tasks.get("gemini-write-task")!;
-    assert.equal(geminiTask.status, "COMPLETED");
-    assert.equal((geminiTask.result as { answer?: { text?: string } }).answer?.text, "ANTIGRAVITY_OAUTH_OK");
-    assert.equal(projects.getMember("local-pi", "gemini-coder")?.threadRuntime, "antigravity");
-    assert.equal(projects.getMember("local-pi", "gemini-coder")?.threadProvider, "google");
-    assert.equal(tasks.attempts("gemini-write-task").at(-1)?.runtime?.kind, "antigravity");
-    assert.ok(tasks.executionReceipt("gemini-write-task"));
+    assert.equal(geminiTask.status, "FAILED");
+    assert.match(geminiTask.error?.message ?? "", /protected interactive Provider/i);
+    assert.equal(projects.getMember("local-pi", "gemini-coder")?.threadRuntime, undefined);
+    assert.equal(tasks.attempts("gemini-write-task").at(-1)?.runtime, undefined);
+    assert.equal(tasks.executionReceipt("gemini-write-task"), undefined);
 
     const deepseekWriteTask = tasks.get("deepseek-write-task")!;
     assert.equal(deepseekWriteTask.status, "COMPLETED");
@@ -2422,7 +2381,7 @@ test("Local Google Antigravity workers run via AntigravityClient and local DeepS
     assert.equal(projects.getMember("local-pi", "deepseek-reviewer")?.threadProvider, "deepseek");
     assert.equal(tasks.attempts("deepseek-review-task").at(-1)?.runtime?.kind, "deepseek-harness");
     assert.ok(tasks.executionReceipt("deepseek-review-task"));
-    assert.equal(usage.summary("local-pi").totalTokens, 750);
+    assert.equal(usage.summary("local-pi").totalTokens, 600);
     assert.equal(toolCalls.list("local-pi").length > 0, true);
   } finally {
     providerHealth.close();
@@ -2436,17 +2395,17 @@ test("Local Google Antigravity workers run via AntigravityClient and local DeepS
   }
 });
 
-test("Remote Linux/macOS targets can run verified DeepSeek directly and automatically fail over when remote Codex quota is exhausted", async () => {
+test("Remote targets reject protected Antigravity even when advertised while verified DeepSeek remains available", async () => {
   const t = await tempStore();
   const projects = new ProjectRegistry(join(t.root, "hub", "projects.sqlite"));
   const tasks = new ProjectTaskStore(projects.path);
   const memories = new ProjectMemoryStore(projects.path);
   const devices = new NetworkRegistry(join(t.root, "hub", "network.sqlite"));
   const providerHealth = new ProviderHealthStore(projects.path, 1, 60_000, 60_000);
-  const calls: Array<{ environmentId?: string; providerInstanceId?: string; model: string }> = [];
-  const verifiedRemoteModels = new Set(["gpt-5.6-sol", "deepseek/deepseek-chat"]);
+  const calls: Array<{ environmentId?: string; providerInstanceId?: string; model: string; runtimeMode: string }> = [];
+  const verifiedRemoteModels = new Set(["gpt-5.6-sol", "deepseek/deepseek-chat", "google/gemini-4-hydrogen"]);
   try {
-    projects.create({ id: "remote-failover", name: "Remote Failover", autonomyMode: "AUTHORIZED_AUTONOMY" });
+    projects.create({ id: "remote-failover", name: "Remote Failover" });
     projects.addMember("remote-failover", {
       id: "linux-coder",
       deviceId: "linux-home",
@@ -2460,6 +2419,19 @@ test("Remote Linux/macOS targets can run verified DeepSeek directly and automati
       allowModelFallback: true,
       fallbackModels: ["deepseek/deepseek-chat"],
       cwd: "/home/user/DurablePiProjects/demo",
+      t3EnvironmentId: "env-linux-b",
+    });
+    projects.addMember("remote-failover", {
+      id: "linux-antigravity",
+      deviceId: "linux-home",
+      sessionId: "t3-code",
+      agentId: "linux-antigravity",
+      name: "Linux Antigravity",
+      role: "coder",
+      permissionProfile: "WORKSPACE_WRITE",
+      executor: "pi",
+      model: "google/gemini-4-hydrogen",
+      cwd: "/home/user/DurablePiProjects/demo-gemini",
       t3EnvironmentId: "env-linux-b",
     });
     projects.addMember("remote-failover", {
@@ -2489,6 +2461,11 @@ test("Remote Linux/macOS targets can run verified DeepSeek directly and automati
       title: "Direct remote DeepSeek work",
       input: { kind: "agent.message", memberId: "linux-deepseek", content: "run tests" },
     });
+    tasks.enqueue("remote-failover", {
+      id: "direct-remote-antigravity",
+      title: "Use the target device Antigravity CLI",
+      input: { kind: "agent.message", memberId: "linux-antigravity", content: "review changes" },
+    });
 
     const worker = new ProjectAgentTaskWorker(tasks, projects, devices, memories, {
       workerId: "remote-failover-worker",
@@ -2506,6 +2483,7 @@ test("Remote Linux/macOS targets can run verified DeepSeek directly and automati
             environmentId: input.environmentId,
             providerInstanceId: input.providerInstanceId,
             model: input.model,
+            runtimeMode: input.runtimeMode,
           });
           await input.onStarted?.({ threadId: `t3-${calls.length}`, runId: `run-${calls.length}`, projectId: "remote-proj" });
           return {
@@ -2533,21 +2511,29 @@ test("Remote Linux/macOS targets can run verified DeepSeek directly and automati
 
     assert.equal(await worker.runOnce("remote-failover"), true);
     assert.equal(await worker.runOnce("remote-failover"), true);
+    assert.equal(await worker.runOnce("remote-failover"), true);
 
     assert.deepEqual(calls, [
       {
         environmentId: "env-linux-b",
         providerInstanceId: "pi_durable_worker",
         model: "deepseek/deepseek-chat",
+        runtimeMode: "auto-accept-edits",
       },
       {
         environmentId: "env-linux-b",
         providerInstanceId: "pi_durable_worker",
         model: "deepseek/deepseek-chat",
+        runtimeMode: "auto-accept-edits",
       },
     ]);
     assert.equal(tasks.get("failover-task")?.status, "COMPLETED");
     assert.equal(tasks.get("direct-remote-ds")?.status, "COMPLETED");
+    assert.equal(tasks.get("direct-remote-antigravity")?.status, "FAILED");
+    assert.match(
+      tasks.get("direct-remote-antigravity")?.error?.message ?? "",
+      /protected interactive Provider/i,
+    );
     assert.equal(
       projects.events("remote-failover").some((event) => event.kind === "model.fallback.selected"),
       true,

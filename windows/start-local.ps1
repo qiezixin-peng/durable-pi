@@ -43,7 +43,7 @@ if (Test-Path -LiteralPath $browseRepair) {
 # T3 under a dedicated Codex provider; read-only work stays on the isolated direct Codex path.
 if ([string]::IsNullOrWhiteSpace($env:DPI_T3_RUNTIME)) { $env:DPI_T3_RUNTIME = '1' }
 if ([string]::IsNullOrWhiteSpace($env:DPI_T3_WORKER_PROVIDER_INSTANCE)) {
-  $env:DPI_T3_WORKER_PROVIDER_INSTANCE = 'codex_durable_worker'
+  $env:DPI_T3_WORKER_PROVIDER_INSTANCE = 'codex'
 }
 if ([string]::IsNullOrWhiteSpace($env:DPI_T3_PI_WORKER_PROVIDER_INSTANCE)) {
   $env:DPI_T3_PI_WORKER_PROVIDER_INSTANCE = 'pi_durable_worker'
@@ -77,6 +77,7 @@ if ($env:DPI_T3_RUNTIME -eq '1') {
     SubagentModel = $(if ($env:DPI_CODEX_SUBAGENT_MODEL) { $env:DPI_CODEX_SUBAGENT_MODEL } else { 'gpt-5.6-sol' })
     SubagentReasoningEffort = $(if ($env:DPI_CODEX_SUBAGENT_REASONING_EFFORT) { $env:DPI_CODEX_SUBAGENT_REASONING_EFFORT } else { 'medium' })
     WorkspaceBaseDirectory = $(if ($env:DPI_T3_WORKSPACE_BASE) { $env:DPI_T3_WORKSPACE_BASE } else { $env:DPI_START_DIRS })
+    AntigravityBinaryPath = $(if ($env:DPI_ANTIGRAVITY_T3_BINARY) { $env:DPI_ANTIGRAVITY_T3_BINARY } else { '' })
   }
   if ($env:DPI_T3_PI_RUNTIME -eq '1' -and $piAvailable) {
     $providerParams.EnablePiWorker = $true

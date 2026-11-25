@@ -33,6 +33,10 @@ import {
   isWorkspacePiMember,
   parseModelSelection,
 } from "../../../../dpi-sdk/src/node/local-model-providers.js";
+import {
+  isDurableDelegationAllowed,
+  PROTECTED_PROVIDER_MESSAGE,
+} from "../../../../dpi-sdk/src/node/provider-isolation.js";
 import { SqliteBackupManager } from "../../../../dpi-sdk/src/node/backups.js";
 import { ProjectArtifactStore } from "../../../../dpi-sdk/src/node/artifacts.js";
 import { ProjectUsageStore } from "../../../../dpi-sdk/src/node/usage.js";
@@ -149,6 +153,8 @@ const validateCodexModelPolicy = async (
     throw Error("At least one fallback model is required when automatic fallback is enabled");
   const normalizedFallbacks = (fallbackModels as string[]).map((candidate) => {
     const parsed = parseModelSelection(candidate);
+    if (!isDurableDelegationAllowed(parsed.provider))
+      throw Object.assign(Error(PROTECTED_PROVIDER_MESSAGE), { status: 409 });
     if (parsed.executor === "pi" && role.toLowerCase() === "coordinator")
       throw Object.assign(
         Error(`Model ${parsed.qualified} cannot be used as a Coordinator fallback`),
@@ -234,9 +240,8 @@ const taskWorker = new ProjectAgentTaskWorker(tasks, projects, registry, memorie
     ? {
         useT3Runtime: true,
         t3RuntimeGateway: t3RuntimeGateway!,
-        t3WorkerProviderInstanceId: process.env.DPI_T3_WORKER_PROVIDER_INSTANCE ?? "codex_durable_worker",
+        t3WorkerProviderInstanceId: process.env.DPI_T3_WORKER_PROVIDER_INSTANCE ?? "codex",
         t3PiWorkerProviderInstanceId: process.env.DPI_T3_PI_WORKER_PROVIDER_INSTANCE ?? DEFAULT_T3_PI_WORKER_PROVIDER_INSTANCE,
-        t3GeminiWorkerProviderInstanceId: process.env.DPI_T3_GEMINI_WORKER_PROVIDER_INSTANCE?.trim() || undefined,
         t3CoordinatorProviderInstanceId: process.env.DPI_T3_COORDINATOR_PROVIDER_INSTANCE ?? "codex_durable_coordinator",
       }
     : {}),
@@ -1302,13 +1307,10 @@ app.post(
         req.body?.provider === undefined ? undefined : String(req.body.provider),
       );
       if (selection.executor !== "pi")
-        throw Error("Pi workspace members require a google/* (Gemini) or deepseek/* model");
+        throw Error("Durable Pi workspace members require a deepseek/* model; Antigravity is direct-T3-only");
+      if (!isDurableDelegationAllowed(selection.provider))
+        throw Object.assign(Error(PROTECTED_PROVIDER_MESSAGE), { status: 409 });
       if (t3EnvironmentId) {
-        if (selection.provider === "google")
-          throw Object.assign(
-            Error("Google Gemini runs strictly locally via Gemini Pro OAuth and cannot bind a remote T3 environment"),
-            { status: 400 },
-          );
         const source = new ReadOnlyDataSourceCatalog(dataSourceCatalogPath).executionSource(
           id,
           t3EnvironmentId,
@@ -1328,7 +1330,9 @@ app.post(
       const fallbackModels = rawFallbacks.map((candidate: string) => {
         const parsed = parseModelSelection(candidate);
         if (parsed.executor !== "pi")
-          throw Error(`Pi fallback model must be google/* or deepseek/*: ${candidate}`);
+          throw Error(`Durable Pi fallback must use an eligible Provider (for Pi workers: deepseek/*): ${candidate}`);
+        if (!isDurableDelegationAllowed(parsed.provider))
+          throw Object.assign(Error(PROTECTED_PROVIDER_MESSAGE), { status: 409 });
         return parsed.qualified;
       });
       res.status(201).json(
@@ -1511,14 +1515,18 @@ app.patch(
       if (req.body?.model !== undefined) {
         const parsed = parseModelSelection(requestedModel, req.body?.provider === undefined ? undefined : String(req.body.provider));
         if (parsed.executor !== "pi")
-          throw Error("Local Pi members require a google/* (Gemini) or deepseek/* model");
+          throw Error("Durable Pi workspace members require a deepseek/* model; Antigravity is direct-T3-only");
+        if (!isDurableDelegationAllowed(parsed.provider))
+          throw Object.assign(Error(PROTECTED_PROVIDER_MESSAGE), { status: 409 });
         requestedModel = parsed.qualified;
       }
       if (Array.isArray(req.body?.fallbackModels)) {
         requestedFallbackModels = req.body.fallbackModels.map((candidate: unknown) => {
           const parsed = parseModelSelection(String(candidate));
           if (parsed.executor !== "pi")
-            throw Error(`Local Pi fallback model must be google/* or deepseek/*: ${String(candidate)}`);
+            throw Error(`Durable Pi fallback must use an eligible Provider (for Pi workers: deepseek/*): ${String(candidate)}`);
+          if (!isDurableDelegationAllowed(parsed.provider))
+            throw Object.assign(Error(PROTECTED_PROVIDER_MESSAGE), { status: 409 });
           return parsed.qualified;
         });
       }

@@ -196,6 +196,24 @@ test("remote data sources bind model evidence to one T3 environment", () => {
       sources: [{ ...source, verifiedModels: ["gpt-5.6-sol", "gpt-5.6-sol"] }],
     }));
     assert.throws(() => new ReadOnlyDataSourceCatalog(catalogPath), /Invalid verified model list/);
+
+    writeFileSync(catalogPath, JSON.stringify({
+      version: 1,
+      sources: [{
+        ...source,
+        verifiedModels: Array.from({ length: 29 }, (_, index) => `provider/model-${index + 1}`),
+      }],
+    }));
+    assert.equal(new ReadOnlyDataSourceCatalog(catalogPath).sources[0]?.verifiedModels?.length, 29);
+
+    writeFileSync(catalogPath, JSON.stringify({
+      version: 1,
+      sources: [{
+        ...source,
+        verifiedModels: Array.from({ length: 65 }, (_, index) => `provider/model-${index + 1}`),
+      }],
+    }));
+    assert.throws(() => new ReadOnlyDataSourceCatalog(catalogPath), /Invalid verified model list/);
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }

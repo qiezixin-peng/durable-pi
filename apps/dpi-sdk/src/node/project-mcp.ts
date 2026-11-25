@@ -16,6 +16,7 @@ import {
   parseModelSelection,
   resolveLocalRoleModel,
 } from "./local-model-providers.js";
+import { isDurableDelegationAllowed, PROTECTED_PROVIDER_MESSAGE } from "./provider-isolation.js";
 import { DataSourceBindingStore, ReadOnlyDataSourceCatalog } from "./data-sources.js";
 import { ProjectHandoffStore } from "./handoffs.js";
 import { ProjectMemoryStore } from "./memories.js";
@@ -337,7 +338,7 @@ const PROJECT_TOOLS = [
   },
   {
     name: "list_durable_local_models",
-    description: "Coordinator-only: list locally supported Gemini (google) and DeepSeek (deepseek) providers on this workstation, credential readiness without exposing secrets, official model IDs and optional local role defaults. These models run locally and are never inherited by remote targets.",
+    description: "Coordinator-only: list Gemini (google) and DeepSeek (deepseek) providers available on the current workstation, credential readiness without exposing secrets, official model IDs and optional role defaults. Remote devices use their own credentials and only explicitly verified models.",
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
@@ -632,7 +633,7 @@ const PROJECT_TOOLS = [
   {
     name: "materialize_durable_agent",
     description:
-      "Coordinator-only: idempotently activate one pre-authorized role from this project's team plan. By default, writable roles get an isolated worktree when the project is a clean committed Git root; otherwise the scheduler safely serializes their shared workspace. Optionally select a local Gemini (google) or DeepSeek (deepseek) provider/model for this workstation.",
+      "Coordinator-only: idempotently activate one pre-authorized role from this project's team plan. By default, the child inherits the Coordinator model. Writable roles get an isolated worktree when possible. Antigravity is protected and cannot be selected; direct Antigravity sessions use its native team runtime.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: {
       type: "object",
@@ -640,7 +641,7 @@ const PROJECT_TOOLS = [
         request_id: { type: "string", minLength: 1, maxLength: 240 },
         role: { type: "string", minLength: 1, maxLength: 80 },
         name: { type: "string", minLength: 1, maxLength: 120 },
-        provider: { type: "string", enum: ["codex", "google", "gemini", "deepseek"] },
+        provider: { type: "string", enum: ["codex", "deepseek"] },
         model: { type: "string", minLength: 1, maxLength: 160 },
         workspace_strategy: { type: "string", enum: ["auto", "shared", "worktree"], default: "auto" },
       },
@@ -686,7 +687,7 @@ const PROJECT_TOOLS = [
   {
     name: "create_durable_agent",
     description:
-      "Coordinator-only: idempotently create a temporary Agent from an active local or remote template without increasing its permission profile. Writable local Agents use an isolated clean Git worktree by default when possible. Local temporary Agents may optionally select a Gemini (google) or DeepSeek (deepseek) provider/model.",
+      "Coordinator-only: idempotently create a temporary Agent from an active local or remote template without increasing its permission profile. The child inherits its template model unless explicitly changed to another Durable-eligible Provider. Antigravity is protected and cannot be selected.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: {
       type: "object",
@@ -695,7 +696,7 @@ const PROJECT_TOOLS = [
         template_member_id: { type: "string", minLength: 1, maxLength: 64 },
         role: { type: "string", minLength: 1, maxLength: 80 },
         name: { type: "string", minLength: 1, maxLength: 120 },
-        provider: { type: "string", enum: ["codex", "google", "gemini", "deepseek"] },
+        provider: { type: "string", enum: ["codex", "deepseek"] },
         model: { type: "string", minLength: 1, maxLength: 160 },
         permission_profile: {
           type: "string",
@@ -1186,7 +1187,7 @@ export class DurableProjectMcpServer {
           return toolResult({
             projectId: project.id,
             coordinatorModel: member.model ?? DEFAULT_CODEX_MODEL,
-            localOnlyPolicy: "Google Gemini (google/*) runs strictly on this local workstation through Google Antigravity (API keys are disabled, and remote Linux/macOS targets do not use Gemini). DeepSeek (deepseek/*) runs locally through DeepSeek Harness (dsh headless --json, reusing the desktop DeepSeek Harness login or credential store) and may also run on remote targets when explicitly deployed and listed in verifiedModels.",
+            providerIsolationPolicy: "Antigravity (google/*) is direct-T3-only: users may open it as an interactive Provider and its official runtime may create native subagents, but Durable Agents, schedulers and fallbacks cannot invoke it. DeepSeek remains Durable-eligible.",
             ...summary,
           });
         }
@@ -1210,7 +1211,14 @@ export class DurableProjectMcpServer {
                 label: source.label,
                 device: source.device,
                 environmentId: source.environmentId,
-                verifiedModels: source.verifiedModels ?? [],
+                verifiedModels: (source.verifiedModels ?? []).filter((model) => {
+                  try { return isDurableDelegationAllowed(parseModelSelection(model).provider); }
+                  catch { return false; }
+                }),
+                protectedInteractiveModels: (source.verifiedModels ?? []).filter((model) => {
+                  try { return !isDurableDelegationAllowed(parseModelSelection(model).provider); }
+                  catch { return false; }
+                }),
                 status: current?.status ?? "unknown",
                 ...(current?.lastReachedAt ? { lastReachedAt: current.lastReachedAt } : {}),
               };
@@ -1973,6 +1981,10 @@ export class DurableProjectMcpServer {
           const target = project.members.find((candidate) => candidate.id === targetId && candidate.lifecycleState !== "ARCHIVED");
           if (!target) throw Error("Target member is not active in this project");
           if (target.id === member.id) throw Error("Coordinator cannot delegate a durable task to itself");
+          if (target.model) {
+            const targetSelection = parseModelSelection(target.model, target.executor === "codex" ? "codex" : undefined, this.options.env);
+            if (!isDurableDelegationAllowed(targetSelection.provider)) throw Error(PROTECTED_PROVIDER_MESSAGE);
+          }
           const content = requiredText(args.content, "content", 100_000);
           const title = args.title === undefined ? content.slice(0, 240) : requiredText(args.title, "title", 240);
           const priority = optionalInteger(args.priority, "priority", -1_000, 1_000);
@@ -2046,6 +2058,7 @@ export class DurableProjectMcpServer {
             fallbackModel: member.model,
             env: this.options.env,
           });
+          if (!isDurableDelegationAllowed(selection.provider)) throw Error(PROTECTED_PROVIDER_MESSAGE);
           const existing = project.members.find((candidate) =>
             !candidate.t3EnvironmentId && candidate.role.trim().toLowerCase() === role
           );
@@ -2150,13 +2163,12 @@ export class DurableProjectMcpServer {
             throw Error(`Data source ${sourceId} is not a remote T3 execution target`);
           const rawModel = requiredText(args.model, "model", 160);
           const selection = parseModelSelection(rawModel, undefined, this.options.env);
+          if (!isDurableDelegationAllowed(selection.provider)) throw Error(PROTECTED_PROVIDER_MESSAGE);
           const model = selection.qualified;
-          if (selection.provider === "google")
-            throw Error("Google Gemini runs strictly locally via Gemini Pro OAuth and is not supported on remote targets; use Codex or a verified remote DeepSeek model");
           if (!source.verifiedModels?.includes(model) && !source.verifiedModels?.includes(rawModel))
             throw Error(
               selection.localOnlyByDefault
-                ? `Model ${model} is not verified for remote target ${sourceId}; deploy Pi + DEEPSEEK_API_KEY on that machine and add ${model} to its verifiedModels before remote use`
+                ? `Model ${model} is not verified for remote target ${sourceId}; verify that device's local provider login and add ${model} to verifiedModels before remote use`
                 : `Model ${rawModel} is not verified for data source ${sourceId}`,
             );
           const relativeTarget = `DurablePiProjects/${slug}`;
@@ -2269,9 +2281,8 @@ export class DurableProjectMcpServer {
           const selection = explicitProvider !== undefined || explicitModel !== undefined
             ? parseModelSelection(explicitModel, explicitProvider, this.options.env)
             : parseModelSelection(template.model, template.executor === "codex" ? "codex" : undefined, this.options.env);
+          if (!isDurableDelegationAllowed(selection.provider)) throw Error(PROTECTED_PROVIDER_MESSAGE);
           if (template.t3EnvironmentId && (explicitProvider !== undefined || explicitModel !== undefined)) {
-            if (selection.provider === "google")
-              throw Error("Google Gemini runs strictly locally via Google Antigravity OAuth and cannot be bound to remote T3 environments");
             let remoteSource: ReturnType<ReadOnlyDataSourceCatalog["executionSource"]> | undefined;
             try {
               remoteSource = new ReadOnlyDataSourceCatalog(this.dataSourceCatalogPath).executionSource(
@@ -2285,7 +2296,7 @@ export class DurableProjectMcpServer {
             if (!remoteSource?.verifiedModels?.includes(selection.qualified))
               throw Error(
                 selection.localOnlyByDefault
-                  ? `Model ${selection.qualified} is not verified for remote T3 environment ${template.t3EnvironmentId}; deploy Pi + DEEPSEEK_API_KEY on that machine and add it to verifiedModels first`
+                  ? `Model ${selection.qualified} is not verified for remote T3 environment ${template.t3EnvironmentId}; verify that device's local provider login and add it to verifiedModels first`
                   : `Model ${selection.qualified} is not verified for remote T3 environment ${template.t3EnvironmentId}`,
               );
           }
@@ -2454,9 +2465,12 @@ export class DurableProjectMcpServer {
           if (attempt?.runtime?.kind !== "t3") return toolResult(cancelled);
           const targetMemberId = typeof input.memberId === "string" ? input.memberId : undefined;
           const targetMember = targetMemberId ? this.projects.getMember(project.id, targetMemberId, true) : undefined;
-          const runtimeMode = targetMember
+          const rawRuntimeMode = targetMember
             ? t3RuntimeModeFor(project.autonomyMode, targetMember.role, targetMember.permissionProfile) ?? "approval-required"
             : "approval-required";
+          const runtimeMode = rawRuntimeMode === "auto" && targetMember?.executor === "pi"
+            ? "auto-accept-edits"
+            : rawRuntimeMode;
           try {
             await (this.options.t3RuntimeGateway ?? new T3RuntimeGateway()).cancel({
               threadId: attempt.runtime.threadId!,

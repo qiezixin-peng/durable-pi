@@ -282,8 +282,11 @@ export class ReadOnlyDataSourceCatalog {
         ? !/^[A-Za-z]:[\\/]/.test(source.remoteRoot)
         : !source.remoteRoot.startsWith("/")))
         throw Error(`Remote data-source root must be absolute: ${source.id}`);
+      // A T3 environment can advertise several Providers and effort variants.
+      // Keep the list bounded, but do not reject a valid multi-Provider catalog
+      // merely because it contains more than the old single-Provider limit.
       if (source.verifiedModels !== undefined &&
-          (!Array.isArray(source.verifiedModels) || source.verifiedModels.length > 20 ||
+          (!Array.isArray(source.verifiedModels) || source.verifiedModels.length > 64 ||
            source.verifiedModels.length === 0 ||
            new Set(source.verifiedModels).size !== source.verifiedModels.length ||
            source.verifiedModels.some((model) =>

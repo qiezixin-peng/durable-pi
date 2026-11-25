@@ -35,6 +35,7 @@ test("inspectAntigravityCliInstallation isolates CLI/T3 account from Desktop Ant
   const root = mkdtempSync(join(tmpdir(), "dpi-agy-iso-"));
   const geminiHome = join(root, ".gemini");
   const t3UserDataDir = join(root, ".t3", "userdata");
+  const env = { ...process.env, DPI_ANTIGRAVITY_APP_DATA_DIR: "antigravity-cli-isolated" };
   try {
     // Populate Desktop Antigravity state ONLY — CLI must stay unauthenticated!
     mkdirSync(join(geminiHome, "antigravity", "conversations"), { recursive: true });
@@ -45,18 +46,22 @@ test("inspectAntigravityCliInstallation isolates CLI/T3 account from Desktop Ant
     );
     writeFileSync(join(geminiHome, "antigravity", "conversations", "desktop-only.db"), "dummy", "utf8");
 
-    const beforeCliLogin = inspectAntigravityCliInstallation(geminiHome, process.env, t3UserDataDir);
+    const beforeCliLogin = inspectAntigravityCliInstallation(geminiHome, env, t3UserDataDir);
     assert.equal(beforeCliLogin.authenticated, false);
     assert.equal(beforeCliLogin.authSource, "none");
 
-    // Once CLI OAuth token exists in ~/.gemini/antigravity-cli, CLI becomes authenticated
-    mkdirSync(join(geminiHome, "antigravity-cli"), { recursive: true });
+    // Once the real CLI OAuth token shape exists in the isolated CLI home, CLI becomes authenticated.
+    mkdirSync(join(geminiHome, "antigravity-cli-isolated"), { recursive: true });
     writeFileSync(
-      join(geminiHome, "antigravity-cli", "acp_token.json"),
-      JSON.stringify({ refresh_token: "cli-only-refresh-token" }),
+      join(geminiHome, "antigravity-cli-isolated", "antigravity-oauth-token"),
+      JSON.stringify({
+        token: { refresh_token: "cli-only-refresh-token", access_token: "cli-only-access-token" },
+        auth_method: "oauth",
+        id_token_email: "cli@example.invalid",
+      }),
       "utf8",
     );
-    const afterCliLogin = inspectAntigravityCliInstallation(geminiHome, process.env, t3UserDataDir);
+    const afterCliLogin = inspectAntigravityCliInstallation(geminiHome, env, t3UserDataDir);
     assert.equal(afterCliLogin.authenticated, true);
     assert.equal(afterCliLogin.authSource, "antigravity-cli-account");
   } finally {
@@ -117,6 +122,7 @@ if (!isResume) {
       executablePath: process.execPath,
       argsPrefix: [fakeAgyJs],
       geminiHome,
+      appDataDirName: "antigravity-cli-isolated",
       env: {
         ...process.env,
         GEMINI_API_KEY: "should-be-stripped",

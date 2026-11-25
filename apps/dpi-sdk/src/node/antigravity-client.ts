@@ -64,6 +64,8 @@ export interface AntigravityClientOptions {
   /** Override `~/.gemini` home directory (CLI state lives under `<geminiHome>/antigravity-cli`,
    * strictly isolated from Desktop Antigravity's `<geminiHome>/antigravity`). */
   geminiHome?: string;
+  /** CLI app-data directory name relative to `geminiHome`. Must never be Desktop's `antigravity`. */
+  appDataDirName?: string;
   /** Override T3 userdata directory (`~/.t3/userdata`) for inspecting T3-managed Antigravity CLI profiles. */
   t3UserDataDir?: string;
   env?: NodeJS.ProcessEnv;
@@ -172,9 +174,14 @@ function hasValidOAuthTokenFile(filePath: string): boolean {
   if (!existsSync(filePath)) return false;
   try {
     const parsed = JSON.parse(readFileSync(filePath, "utf8")) as Record<string, unknown>;
+    const nestedToken = parsed.token && typeof parsed.token === "object"
+      ? parsed.token as Record<string, unknown>
+      : undefined;
     return (
       (typeof parsed.refresh_token === "string" && parsed.refresh_token.trim().length > 0) ||
-      (typeof parsed.access_token === "string" && parsed.access_token.trim().length > 0)
+      (typeof parsed.access_token === "string" && parsed.access_token.trim().length > 0) ||
+      (typeof nestedToken?.refresh_token === "string" && nestedToken.refresh_token.trim().length > 0) ||
+      (typeof nestedToken?.access_token === "string" && nestedToken.access_token.trim().length > 0)
     );
   } catch {
     return false;
@@ -195,7 +202,12 @@ export function listAntigravityCliProfileDirs(
   const t3UserData = resolveT3UserDataDir(explicitT3Dir, env);
   const dirs: string[] = [];
 
-  const cliDir = join(geminiHome, "antigravity-cli");
+  const configuredCliDirName = env.DPI_ANTIGRAVITY_APP_DATA_DIR?.trim() || "antigravity-cli";
+  const safeCliDirName = /^[a-zA-Z0-9._-]+$/.test(configuredCliDirName) &&
+      configuredCliDirName !== "." && configuredCliDirName !== ".." && configuredCliDirName !== "antigravity"
+    ? configuredCliDirName
+    : "antigravity-cli";
+  const cliDir = join(geminiHome, safeCliDirName);
   dirs.push(cliDir);
 
   const acpDir = join(geminiHome, "antigravity-acp");
@@ -225,7 +237,8 @@ export function inspectAntigravityCliInstallation(
   explicitT3Dir?: string,
 ): AntigravityCliInstallationStatus {
   const geminiHome = resolveGeminiHomeDir(explicitGeminiHome, env);
-  const cliStateDir = join(geminiHome, "antigravity-cli");
+  const cliStateDir = listAntigravityCliProfileDirs(geminiHome, explicitT3Dir, env)[0] ??
+    join(geminiHome, "antigravity-cli");
   const executablePath = findAntigravityCliExecutable(env, explicitT3Dir);
   const runtimeInstalled = executablePath !== null;
   const profileDirs = listAntigravityCliProfileDirs(geminiHome, explicitT3Dir, env);
@@ -233,6 +246,7 @@ export function inspectAntigravityCliInstallation(
   let authenticated = false;
   for (const dir of profileDirs) {
     if (
+      hasValidOAuthTokenFile(join(dir, "antigravity-oauth-token")) ||
       hasValidOAuthTokenFile(join(dir, "acp_token.json")) ||
       hasValidOAuthTokenFile(join(dir, "oauth_creds.json")) ||
       hasValidOAuthTokenFile(join(dir, "credentials.json"))
@@ -276,11 +290,20 @@ export class AntigravityClient {
   private readonly executablePath: string;
   private readonly argsPrefix: string[];
   private readonly geminiHome: string;
+  private readonly appDataDirName: string;
   private readonly env: NodeJS.ProcessEnv;
 
   constructor(options?: AntigravityClientOptions) {
     this.env = options?.env ?? process.env;
     this.geminiHome = resolveGeminiHomeDir(options?.geminiHome, this.env);
+    this.appDataDirName = options?.appDataDirName?.trim() ||
+      this.env.DPI_ANTIGRAVITY_APP_DATA_DIR?.trim() || "antigravity-cli";
+    if (
+      !/^[a-zA-Z0-9._-]+$/.test(this.appDataDirName) ||
+      this.appDataDirName === "." || this.appDataDirName === ".." || this.appDataDirName === "antigravity"
+    ) {
+      throw new Error("Invalid or unsafe Antigravity CLI app-data directory name");
+    }
     const resolved =
       options?.executablePath?.trim() ||
       findAntigravityCliExecutable(this.env, options?.t3UserDataDir);
@@ -311,6 +334,7 @@ export class AntigravityClient {
 
     const args: string[] = [
       ...this.argsPrefix,
+      `--app_data_dir=${this.appDataDirName}`,
       "--print",
       "--output-format",
       "stream-json",

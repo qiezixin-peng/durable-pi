@@ -456,6 +456,8 @@ export const hub = {
       configured: boolean;
       authSource: "dsh-account" | "dsh-credentials" | "env" | "pi-auth" | "both" | "antigravity-cli-account" | "none";
       remoteAllowedByDefault: false;
+      durableDelegationAllowed: boolean;
+      interactionMode: "direct-t3-only" | "durable-worker";
       verifiedModels: string[];
       models: Array<{
         id: string;

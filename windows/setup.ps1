@@ -22,7 +22,7 @@ $backendHost = if ($env:DPI_HOST) { $env:DPI_HOST } else { '127.0.0.1' }
 $backendPort = if ($env:DPI_PORT) { [int]$env:DPI_PORT } else { 4780 }
 $hubPort = if ($env:DPI_HUB_PORT) { [int]$env:DPI_HUB_PORT } else { 4781 }
 $t3Runtime = if ($env:DPI_T3_RUNTIME) { $env:DPI_T3_RUNTIME } else { '1' }
-$workerProvider = if ($env:DPI_T3_WORKER_PROVIDER_INSTANCE) { $env:DPI_T3_WORKER_PROVIDER_INSTANCE } else { 'codex_durable_worker' }
+$workerProvider = if ($env:DPI_T3_WORKER_PROVIDER_INSTANCE) { $env:DPI_T3_WORKER_PROVIDER_INSTANCE } else { 'codex' }
 $coordinatorProvider = if ($env:DPI_T3_COORDINATOR_PROVIDER_INSTANCE) { $env:DPI_T3_COORDINATOR_PROVIDER_INSTANCE } else { 'codex_durable_coordinator' }
 
 function New-DpiToken {
@@ -74,7 +74,7 @@ $envLines = @(
   "DPI_T3_COORDINATOR_PROVIDER_INSTANCE=$coordinatorProvider",
   "DPI_NETWORK_DEVICE_ID=$(if ($env:DPI_NETWORK_DEVICE_ID) { $env:DPI_NETWORK_DEVICE_ID } else { 'local' })"
 )
-foreach ($name in @('DPI_DATA_ROOT_MAPPINGS_JSON','DPI_T3_WAITING_INTERVAL_MS','DPI_T3_PROJECT_INTERVAL_MS','DPI_T3_ENVIRONMENT_INTERVAL_MS','DEEPSEEK_API_KEY','DEEPSEEK_BASE_URL','DPI_T3_PI_RUNTIME','DPI_T3_PI_WORKER_PROVIDER_INSTANCE','DPI_T3_GEMINI_WORKER_PROVIDER_INSTANCE','DPI_ROLE_MODEL_MAP_JSON','DPI_FALLBACK_MODELS')) {
+foreach ($name in @('DPI_DATA_ROOT_MAPPINGS_JSON','DPI_T3_WAITING_INTERVAL_MS','DPI_T3_PROJECT_INTERVAL_MS','DPI_T3_ENVIRONMENT_INTERVAL_MS','DEEPSEEK_API_KEY','DEEPSEEK_BASE_URL','DPI_T3_PI_RUNTIME','DPI_T3_PI_WORKER_PROVIDER_INSTANCE','DPI_T3_GEMINI_WORKER_PROVIDER_INSTANCE','DPI_ANTIGRAVITY_T3_BINARY','DPI_ROLE_MODEL_MAP_JSON','DPI_FALLBACK_MODELS')) {
   $value = [Environment]::GetEnvironmentVariable($name, 'Process')
   if ($value) { $envLines += "$name=$value" }
 }
