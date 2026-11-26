@@ -25,6 +25,28 @@ export interface CoordinatorWorkIntent {
   operations: Array<{ kind: GovernanceOperationKind; parameters?: unknown }>;
 }
 
+const exactApprovalParameters = (kind: GovernanceOperationKind, value: unknown) => {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw Error(`High-risk operation ${kind} requires a non-empty parameter object`);
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(value, (_key, item) => {
+      if (typeof item === "undefined" || typeof item === "function" || typeof item === "symbol" ||
+          typeof item === "bigint" || (typeof item === "number" && !Number.isFinite(item)))
+        throw Error("parameters must contain only finite JSON values");
+      return item;
+    });
+  } catch (error) {
+    throw Error(`High-risk operation ${kind} requires deterministic JSON parameters: ${
+      error instanceof Error ? error.message : String(error)}`);
+  }
+  if (serialized === "{}")
+    throw Error(`High-risk operation ${kind} requires a non-empty parameter object`);
+  if (serialized.length > 65_536)
+    throw Error(`High-risk operation ${kind} parameters exceed 65536 bytes`);
+  return JSON.parse(serialized) as Record<string, unknown>;
+};
+
 export const classifyCoordinatorWork = (intent: CoordinatorWorkIntent) => {
   const hasHighRiskOperation = intent.operations.some((operation) =>
     (HIGH_RISK_OPERATION_KINDS as readonly string[]).includes(operation.kind));
@@ -40,18 +62,11 @@ export const classifyCoordinatorWork = (intent: CoordinatorWorkIntent) => {
     substantive && ["edit", "implementation"].includes(intent.workKind) ? "focused" : "none";
   const operations = intent.operations.map((operation) => {
     const highRisk = (HIGH_RISK_OPERATION_KINDS as readonly string[]).includes(operation.kind);
-    if (highRisk) {
-      if (!operation.parameters || typeof operation.parameters !== "object" || Array.isArray(operation.parameters) ||
-          Object.keys(operation.parameters).length === 0)
-        throw Error(`High-risk operation ${operation.kind} requires a non-empty parameter object`);
-      const serialized = JSON.stringify(operation.parameters);
-      if (serialized.length > 65_536)
-        throw Error(`High-risk operation ${operation.kind} parameters exceed 65536 bytes`);
-    }
+    const approvalBinding = highRisk ? exactApprovalParameters(operation.kind, operation.parameters) : undefined;
     return {
       ...operation,
       approvalRequired: highRisk,
-      approvalBinding: highRisk ? operation.parameters : undefined,
+      approvalBinding,
     };
   });
   return {
@@ -105,35 +120,42 @@ export class CoordinatorGovernanceStore {
       createdAt: row.created_at, updatedAt: row.updated_at };
   }
 
-  route(projectId: string, memberId: string, requestId: string, title: string, intent: CoordinatorWorkIntent, now = Date.now()) {
-    const plan = classifyCoordinatorWork(intent);
+  private immediate<T>(operation: () => T) {
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const result = operation();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  route(projectId: string, memberId: string, requestId: string, title: string, intent: CoordinatorWorkIntent, now = Date.now()) {
+    const plan = classifyCoordinatorWork(intent);
+    const planJson = JSON.stringify(plan);
+    return this.immediate(() => {
       const existing = this.db.prepare(
         "SELECT * FROM coordinator_work_records WHERE project_id=? AND coordinator_member_id=? AND request_id=?",
       ).get(projectId, memberId, requestId) as CoordinationRow | undefined;
       if (existing) {
-        if (existing.title !== title || existing.plan_json !== JSON.stringify(plan))
+        if (existing.title !== title || existing.plan_json !== planJson)
           throw Error("request_id was reused with different coordinator work parameters");
-        this.db.exec("COMMIT");
         return this.value(existing);
       }
       const id = randomUUID();
       this.db.prepare(`INSERT INTO coordinator_work_records(
         id,project_id,request_id,coordinator_member_id,title,classification,plan_json,bypass_reason,status,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(id, projectId, requestId, memberId, title, plan.classification,
-          JSON.stringify(plan), plan.bypassReason ?? null, plan.classification === "SUBSTANTIVE" ? "PLANNED" : "BYPASSED", now, now);
+          planJson, plan.bypassReason ?? null, plan.classification === "SUBSTANTIVE" ? "PLANNED" : "BYPASSED", now, now);
       this.db.prepare("INSERT INTO project_events(project_id,kind,detail_json,created_at) VALUES(?,?,?,?)")
         .run(projectId, plan.classification === "SUBSTANTIVE" ? "coordination.planned" : "coordination.bypassed",
           JSON.stringify({ coordinationId: id, requestId, classification: plan.classification,
             status: plan.classification === "SUBSTANTIVE" ? "PLANNED" : "BYPASSED",
             ...(plan.bypassReason ? { bypassReason: plan.bypassReason } : {}) }), now);
-      this.db.exec("COMMIT");
       return this.get(projectId, id)!;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   get(projectId: string, id: string) {

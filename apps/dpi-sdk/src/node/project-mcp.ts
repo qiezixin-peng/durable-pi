@@ -329,9 +329,15 @@ const PROJECT_TOOLS = [
         estimated_files: { type: "integer", minimum: 0, maximum: 100000, default: 0 },
         independent_verification: { type: "boolean", default: false },
         remote_data_requested: { type: "boolean", default: false },
-        operations: { type: "array", maxItems: 100, items: { type: "object", properties: {
-          kind: { type: "string", enum: [...ROUTINE_OPERATION_KINDS, ...HIGH_RISK_OPERATION_KINDS] }, parameters: {},
-        }, required: ["kind"], additionalProperties: false } },
+        operations: { type: "array", maxItems: 100, items: { oneOf: [
+          { type: "object", properties: {
+            kind: { type: "string", enum: [...ROUTINE_OPERATION_KINDS] }, parameters: {},
+          }, required: ["kind"], additionalProperties: false },
+          { type: "object", properties: {
+            kind: { type: "string", enum: [...HIGH_RISK_OPERATION_KINDS] },
+            parameters: { type: "object", minProperties: 1 },
+          }, required: ["kind", "parameters"], additionalProperties: false },
+        ] } },
       },
       required: ["request_id", "title", "work_kind"], additionalProperties: false,
     },

@@ -5,6 +5,8 @@ import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
+import { Worker } from "node:worker_threads";
 
 import { ProjectMemoryStore } from "../src/node/memories.js";
 import { DurableProjectMcpServer, resolveDurableProjectContext } from "../src/node/project-mcp.js";
@@ -512,6 +514,12 @@ test("coordinator governance automatically permits routine work and parameter-bi
     assert.match((unboundRisk?.result as { content: Array<{ text: string }> }).content[0]!.text,
       /requires a non-empty parameter object/);
 
+    const invalidRisk = await route("invalid-risk", [
+      { kind: "publish_push_deploy", parameters: { remote: undefined } },
+    ], "implementation");
+    assert.match((invalidRisk?.result as { content: Array<{ text: string }> }).content[0]!.text,
+      /requires deterministic JSON parameters/);
+
     const small = await route("small-implementation", [{ kind: "safe_workspace_edit" }], "implementation");
     const bounded = (small?.result as { structuredContent: { record: {
       classification: string; plan: { agentRoles: string[] };
@@ -536,6 +544,69 @@ test("coordinator governance automatically permits routine work and parameter-bi
       /authoritative Durable coordination record/);
   } finally {
     server.close();
+  }
+});
+
+test("coordinator governance serializes concurrent idempotent admission across database connections", async () => {
+  const { database, coordinator } = await fixture();
+  const gate = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 2);
+  const moduleUrl = new URL("../src/node/coordinator-governance.ts", import.meta.url).href;
+  const workerSource = `
+    const { parentPort, workerData } = require("node:worker_threads");
+    (async () => {
+      const { CoordinatorGovernanceStore } = await import(workerData.moduleUrl);
+      const store = new CoordinatorGovernanceStore(workerData.database);
+      const state = new Int32Array(workerData.gate);
+      Atomics.add(state, 0, 1);
+      Atomics.notify(state, 0);
+      Atomics.wait(state, 1, 0);
+      try {
+        const record = store.route("alpha", workerData.memberId, "same-key", "Concurrent route", {
+          workKind: "implementation", workstreamCount: 2, estimatedFiles: 2,
+          independentVerification: false, remoteDataRequested: false,
+          operations: [{ kind: "safe_workspace_edit", parameters: { root: "workspace" } }],
+        }, 123456789);
+        parentPort.postMessage({ ok: true, record });
+      } catch (error) {
+        parentPort.postMessage({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      } finally {
+        store.close();
+      }
+    })();
+  `;
+  const run = () => new Promise<{ ok: boolean; record?: { id: string }; error?: string }>((resolve, reject) => {
+    const worker = new Worker(workerSource, {
+      eval: true,
+      workerData: { gate, moduleUrl, database, memberId: coordinator.id },
+    });
+    let result: { ok: boolean; record?: { id: string }; error?: string } | undefined;
+    worker.once("message", (message) => {
+      result = message;
+      void worker.terminate();
+    });
+    worker.once("error", reject);
+    worker.once("exit", () => {
+      if (result) resolve(result);
+    });
+  });
+  const state = new Int32Array(gate);
+  const first = run();
+  while (Atomics.load(state, 0) < 1) await delay(1);
+  const second = run();
+  while (Atomics.load(state, 0) < 2) await delay(1);
+  Atomics.store(state, 1, 1);
+  Atomics.notify(state, 1, 2);
+  const results = await Promise.all([first, second]);
+  assert.deepEqual(results.map((result) => result.ok), [true, true]);
+  assert.equal(results[0]!.record!.id, results[1]!.record!.id,
+    "the later connection must replay the committed record");
+
+  const projects = new ProjectRegistry(database);
+  try {
+    const events = projects.events("alpha").filter((event) => event.kind === "coordination.planned");
+    assert.equal(events.length, 1, "record admission and its audit event must commit exactly once");
+  } finally {
+    projects.close();
   }
 });
 
