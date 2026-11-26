@@ -2,7 +2,7 @@ import type { ProjectTask } from "../../../../dpi-sdk/src/api.js";
 import { ProjectRegistry } from "../../../../dpi-sdk/src/node/projects.js";
 import { ProjectTaskStore } from "../../../../dpi-sdk/src/node/tasks.js";
 import type { T3RuntimeGateway } from "../../../../dpi-sdk/src/node/t3-runtime.js";
-import { t3RuntimeModeFor } from "./task-worker.js";
+import { t3CoordinatorRuntimeModeFor, t3RuntimeModeFor } from "./task-worker.js";
 
 type StatusGateway = Pick<T3RuntimeGateway, "status">;
 
@@ -53,7 +53,9 @@ export class T3WaitingTaskMonitor {
     const project = this.projects.get(task.projectId);
     const member = this.projects.getMember(task.projectId, input.memberId);
     if (!project || !member) return false;
-    const runtimeMode = t3RuntimeModeFor(project.autonomyMode, member.role, member.permissionProfile) ?? "approval-required";
+    const runtimeMode = member.role.toLowerCase() === "coordinator"
+      ? t3CoordinatorRuntimeModeFor(project.autonomyMode)
+      : t3RuntimeModeFor(project.autonomyMode, member.role, member.permissionProfile) ?? "approval-required";
     const status = await this.gateway.status({
       threadId: attempt.runtime.threadId,
       runId: attempt.runtime.runId,

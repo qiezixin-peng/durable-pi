@@ -5,7 +5,12 @@ import { basename, isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { ProjectMember, ProjectSummary } from "../api.js";
-import { memberPermissionWithinTemplate, memberRoleCanWrite, t3RuntimeModeFor } from "../execution-policy.js";
+import {
+  memberPermissionWithinTemplate,
+  memberRoleCanWrite,
+  t3CoordinatorRuntimeModeFor,
+  t3RuntimeModeFor,
+} from "../execution-policy.js";
 import { durableProjectTeamPlan, durableProjectTemplate } from "../project-templates.js";
 import { ProjectArtifactStore } from "./artifacts.js";
 import { CoordinatorGovernanceStore, HIGH_RISK_OPERATION_KINDS, ROUTINE_OPERATION_KINDS } from "./coordinator-governance.js";
@@ -2548,7 +2553,9 @@ export class DurableProjectMcpServer {
           const targetMemberId = typeof input.memberId === "string" ? input.memberId : undefined;
           const targetMember = targetMemberId ? this.projects.getMember(project.id, targetMemberId, true) : undefined;
           const rawRuntimeMode = targetMember
-            ? t3RuntimeModeFor(project.autonomyMode, targetMember.role, targetMember.permissionProfile) ?? "approval-required"
+            ? targetMember.role.toLowerCase() === "coordinator"
+              ? t3CoordinatorRuntimeModeFor(project.autonomyMode)
+              : t3RuntimeModeFor(project.autonomyMode, targetMember.role, targetMember.permissionProfile) ?? "approval-required"
             : "approval-required";
           const runtimeMode = rawRuntimeMode === "auto" && targetMember?.executor === "pi"
             ? "auto-accept-edits"

@@ -71,7 +71,7 @@ function Set-ProviderInstance([string]$InstanceId, [string]$DisplayName, [string
 
 $modelArgs = "-c model_reasoning_effort=$ReasoningEffort -c service_tier=$ServiceTier -c agents.default_subagent_model=$SubagentModel -c agents.default_subagent_reasoning_effort=$SubagentReasoningEffort"
 $workerArgs = "$modelArgs -c features.multi_agent=false -c features.multi_agent_v2=false -c mcp_servers.anode.enabled=false -c mcp_servers.durable-pi.enabled=false -c mcp_servers.durable-pi-auto.enabled=false -c mcp_servers.rea.enabled=false -c mcp_servers.reaper.enabled=false"
-$coordinatorArgs = '-c features.multi_agent=false -c features.multi_agent_v2=false -c mcp_servers.anode.enabled=false -c mcp_servers.durable-pi.enabled=false -c mcp_servers.durable-pi-auto.enabled=true -c mcp_servers.durable-data.enabled=false -c mcp_servers.rea.enabled=false -c mcp_servers.reaper.enabled=false'
+$coordinatorArgs = '-c features.multi_agent=false -c features.multi_agent_v2=false -c mcp_servers.anode.enabled=false -c mcp_servers.durable-pi.enabled=false -c mcp_servers.durable-pi-auto.enabled=true -c mcp_servers.durable-data.enabled=true -c mcp_servers.rea.enabled=false -c mcp_servers.reaper.enabled=false'
 $coordinatorArgs = "$modelArgs $coordinatorArgs"
 $workerChanged = if ($WorkerInstanceId -eq 'codex') {
   # T3 already exposes its built-in Codex provider. Reuse it for workers and

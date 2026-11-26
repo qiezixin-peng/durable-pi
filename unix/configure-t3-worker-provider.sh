@@ -70,7 +70,7 @@ providers["codex_durable_coordinator"] = {
             launch_args,
             "-c mcp_servers.durable-pi.enabled=false",
             "-c mcp_servers.durable-pi-auto.enabled=true",
-            "-c mcp_servers.durable-data.enabled=false",
+            "-c mcp_servers.durable-data.enabled=true",
         ])),
     },
 }

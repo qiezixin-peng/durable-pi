@@ -38,3 +38,15 @@ export const t3RuntimeModeFor = (
   if (autonomyMode === "AUTHORIZED_AUTONOMY") return "auto-accept-edits";
   return "auto";
 };
+
+/** The Coordinator owns orchestration rather than a writable role profile, but
+ * still needs bounded inspection and scheduling commands to follow the selected
+ * project autonomy mode. Durable governance remains the approval boundary for
+ * destructive or externally visible operations. */
+export const t3CoordinatorRuntimeModeFor = (
+  autonomyMode: ProjectAutonomyMode,
+): T3RuntimeMode => {
+  if (autonomyMode === "SUPERVISED") return "approval-required";
+  if (autonomyMode === "AUTHORIZED_AUTONOMY") return "auto-accept-edits";
+  return "auto";
+};

@@ -34,7 +34,7 @@ $linksText = Invoke-RemoteT3 'environment list --json'
 $links = @($linksText | ConvertFrom-Json)
 $existing = $links | Where-Object environmentId -eq $local.environmentId | Select-Object -First 1
 $renewAfter = [DateTimeOffset]::Now.AddDays($RenewBeforeDays)
-if ($existing -and $existing.status -eq 'reachable' -and
+if ($existing -and $existing.status -eq 'reachable' -and $existing.access -eq $Access -and
     [DateTimeOffset]::Parse($existing.expiresAt) -gt $renewAfter) {
   [pscustomobject]@{ changed = $false; remote = $RemoteTarget; environmentId = $local.environmentId; status = 'reachable' }
   exit 0

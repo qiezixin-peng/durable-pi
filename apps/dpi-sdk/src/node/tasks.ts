@@ -699,6 +699,40 @@ export class ProjectTaskStore {
       )
       .all(projectId, now) as TaskRow[];
     for (const row of rows) {
+      const attempt = this.db
+        .prepare(
+          `SELECT runtime_binding_json FROM task_attempts
+           WHERE task_id=? AND fence_epoch=? AND finished_at IS NULL`,
+        )
+        .get(row.id, row.fence_epoch) as { runtime_binding_json: string | null } | undefined;
+      const runtime = parse(attempt?.runtime_binding_json ?? null) as {
+        kind?: unknown;
+        threadId?: unknown;
+        runId?: unknown;
+      } | undefined;
+      if (runtime?.kind === "t3" && typeof runtime.threadId === "string" && typeof runtime.runId === "string") {
+        const error = { code: "LEASE_EXPIRED", message: "Lease expired; recover the existing T3 run" };
+        this.db
+          .prepare(
+            `UPDATE project_tasks SET status='RETRYING',lease_owner=NULL,lease_until=NULL,
+               deferred_attempt_count=deferred_attempt_count+1,error_json=?,version=version+1,updated_at=?
+             WHERE id=? AND fence_epoch=?`,
+          )
+          .run(json(error), now, row.id, row.fence_epoch);
+        this.db
+          .prepare(
+            `UPDATE task_attempts SET status='EXPIRED',finished_at=?,error_json=?
+             WHERE task_id=? AND fence_epoch=? AND finished_at IS NULL`,
+          )
+          .run(now, json(error), row.id, row.fence_epoch);
+        this.event(projectId, "task.runtime_recovery_queued", {
+          taskId: row.id,
+          fenceEpoch: row.fence_epoch,
+          threadId: runtime.threadId,
+          runId: runtime.runId,
+        }, now);
+        continue;
+      }
       const error = { code: "LEASE_EXPIRED", message: "Lease expired and the task exhausted its attempts" };
       this.db
         .prepare(

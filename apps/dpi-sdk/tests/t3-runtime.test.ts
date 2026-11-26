@@ -48,6 +48,42 @@ test("T3 runtime resolves the project, launches, waits, reads, and closes", asyn
   assert.deepEqual(calls, ["initialize", "projects", "launch:approval-required", "wait", "read", "close"]);
 });
 
+test("T3 runtime never substitutes an older run when the activity window is truncated", async () => {
+  const reads: string[] = [];
+  const gateway = new T3RuntimeGateway({
+    connect: async () => ({
+      initialize: async () => undefined,
+      listProjects: async () => [{ id: "project-1", title: "Demo", workspaceRoot: process.cwd() }],
+      launchThread: async () => ({
+        threadId: "thread-long", projectId: "project-1", runId: "run-current", status: "running", link: null,
+      }),
+      sendThread: async () => { throw Error("not used"); },
+      waitThread: async () => ({
+        threadId: "thread-long", runId: "run-current", status: "completed", timedOut: false, next: null,
+      }),
+      interruptThread: async () => { throw Error("not used"); },
+      readThread: async (input: { view?: string }) => {
+        reads.push(input.view ?? "messages");
+        return input.view === "activity"
+          ? { thread: { projectId: "project-1" }, items: [
+              { runId: "run-old", type: "assistant_message", createdBy: "agent", text: "stale answer" },
+            ] }
+          : { thread: { projectId: "project-1" }, items: [
+              { runId: "run-current", type: "assistant_message", createdBy: "agent", text: "exact answer" },
+            ] };
+      },
+      environmentLinks: async () => ({ environmentId: "env-a", links: [], notListed: "" }),
+      close: async () => undefined,
+    }),
+  });
+  const result = await gateway.run({
+    cwd: process.cwd(), title: "Long task", message: "Continue", clientRequestId: "request-long",
+    model: "gpt-5.6-sol", runtimeMode: "auto",
+  });
+  assert.equal(result.text, "exact answer");
+  assert.deepEqual(reads, ["activity", "messages"]);
+});
+
 test("T3 runtime resumes an existing thread and reports a user wait", async () => {
   let closed = false;
   const gateway = new T3RuntimeGateway({

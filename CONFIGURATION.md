@@ -20,7 +20,7 @@ Generated runtime credentials are preserved when setup is rerun.
 
 - **Paths and listeners:** `DPI_HOME`, `DPI_WORKSPACE_ROOT`, `DPI_NETWORK_FILE`, `DPI_HOST`, `DPI_PORT`,
   `DPI_HUB_HOST`, `DPI_HUB_PORT`.
-- **T3 routing:** `DPI_T3_LOCAL_PORT`, `DPI_T3_PEERS`, `DPI_TUNNEL_REMOTE_SSH_PORT`,
+- **T3 routing:** `DPI_T3_LOCAL_PORT`, `DPI_T3_PEERS`, `DPI_T3_PEER_ACCESS`, `DPI_TUNNEL_REMOTE_SSH_PORT`,
   `DPI_TUNNEL_REMOTE_T3_PORT`, `DPI_DATA_ROOT_MAPPINGS_JSON`.
 - **Scheduler and context:** concurrency, coordination-depth, context-budget and polling variables documented in
   `.env.example`.

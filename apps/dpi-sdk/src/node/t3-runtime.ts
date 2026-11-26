@@ -196,7 +196,21 @@ export class T3RuntimeGateway {
     const assistantMessages = items.filter((item) =>
       item.type === "assistant_message" && typeof item.text === "string"
     );
-    const answer = assistantMessages.filter((item) => item.runId === input.runId).at(-1) ?? assistantMessages.at(-1);
+    let answer = assistantMessages.filter((item) => item.runId === input.runId).at(-1);
+    if (!answer && status === "completed") {
+      const messagesRead = await session.readThread({
+        ...(input.environmentId ? { environmentId: input.environmentId } : {}),
+        threadId: input.threadId,
+        view: "messages",
+        limit: 100,
+        runLimit: 50,
+        maxCharsPerItem: 20_000,
+      });
+      const messages = Array.isArray(messagesRead.items) ? messagesRead.items as JsonObject[] : [];
+      answer = messages.filter((item) =>
+        item.type === "assistant_message" && item.runId === input.runId && typeof item.text === "string"
+      ).at(-1);
+    }
     const text = typeof answer?.text === "string" ? answer.text : "";
     if (status === "completed" && !text) throw Error("T3 runtime completed without an agent result");
     const thread = read.thread && typeof read.thread === "object" && !Array.isArray(read.thread)

@@ -55,7 +55,7 @@ import { StreamMux } from "./mux.js";
 import { proxy } from "./proxy.js";
 import { guard } from "./guard.js";
 import { seedFromConfig } from "./seed.js";
-import { ProjectAgentTaskWorker, t3RuntimeModeFor } from "./task-worker.js";
+import { ProjectAgentTaskWorker, t3CoordinatorRuntimeModeFor, t3RuntimeModeFor } from "./task-worker.js";
 import { authenticateRemoteDevice } from "./device-auth.js";
 import { T3WaitingTaskMonitor } from "./t3-waiting-monitor.js";
 import { T3ProjectMonitor } from "./t3-project-monitor.js";
@@ -1226,7 +1226,9 @@ app.post(
       if (attempt?.runtime?.kind === "t3") {
         const project = projects.get(projectId)!;
         const mode = member
-          ? t3RuntimeModeFor(project.autonomyMode, member.role, member.permissionProfile) ?? "approval-required"
+          ? member.role.toLowerCase() === "coordinator"
+            ? t3CoordinatorRuntimeModeFor(project.autonomyMode)
+            : t3RuntimeModeFor(project.autonomyMode, member.role, member.permissionProfile) ?? "approval-required"
           : "approval-required";
         try {
           await t3RuntimeGateway.cancel({

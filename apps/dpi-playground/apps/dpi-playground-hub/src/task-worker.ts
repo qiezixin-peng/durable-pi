@@ -19,7 +19,12 @@ import type { ProjectTaskStore } from "../../../../dpi-sdk/src/node/tasks.js";
 import type { ProjectMemoryStore } from "../../../../dpi-sdk/src/node/memories.js";
 import type { ProjectApprovalStore } from "../../../../dpi-sdk/src/node/approvals.js";
 import { assembleContext, contextRelevance } from "../../../../dpi-sdk/src/context-budget.js";
-import { memberPermissionWithinTemplate, memberRoleCanWrite, t3RuntimeModeFor } from "../../../../dpi-sdk/src/execution-policy.js";
+import {
+  memberPermissionWithinTemplate,
+  memberRoleCanWrite,
+  t3CoordinatorRuntimeModeFor,
+  t3RuntimeModeFor,
+} from "../../../../dpi-sdk/src/execution-policy.js";
 import type { ProjectUsageStore } from "../../../../dpi-sdk/src/node/usage.js";
 import type { ProviderHealthStore } from "../../../../dpi-sdk/src/node/provider-health.js";
 import type { ProjectToolCallStore } from "../../../../dpi-sdk/src/node/tool-calls.js";
@@ -250,7 +255,7 @@ export const codexRolePolicy = (
   };
 };
 
-export { t3RuntimeModeFor };
+export { t3CoordinatorRuntimeModeFor, t3RuntimeModeFor };
 
 export const memberRequiresReadOnly = (
   autonomyMode: ProjectAutonomyMode,
@@ -1541,7 +1546,7 @@ export class ProjectAgentTaskWorker {
     const workspacePi = isWorkspacePiMember(member);
     const plannedT3RuntimeMode = member.executor === "codex"
       ? (isCoordinator
-          ? "approval-required" as const
+          ? t3CoordinatorRuntimeModeFor(project.autonomyMode)
           : t3RuntimeModeFor(project.autonomyMode, member.role, member.permissionProfile))
       : workspacePi
         ? (isCoordinator

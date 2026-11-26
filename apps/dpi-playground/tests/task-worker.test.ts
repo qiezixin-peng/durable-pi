@@ -18,7 +18,14 @@ import { ProjectToolCallStore } from "../../dpi-sdk/src/node/tool-calls.js";
 import { ProjectWorktreeStore } from "../../dpi-sdk/src/node/worktrees.js";
 import { T3EnvironmentUnavailableError } from "../../dpi-sdk/src/node/t3-runtime.js";
 import { bootServer, faux, newToken, tempStore } from "../../dpi-backend/tests/helpers.js";
-import { adaptiveRetryDelay, codexRolePolicy, memberRequiresReadOnly, ProjectAgentTaskWorker, t3RuntimeModeFor } from "../apps/dpi-playground-hub/src/task-worker.js";
+import {
+  adaptiveRetryDelay,
+  codexRolePolicy,
+  memberRequiresReadOnly,
+  ProjectAgentTaskWorker,
+  t3CoordinatorRuntimeModeFor,
+  t3RuntimeModeFor,
+} from "../apps/dpi-playground-hub/src/task-worker.js";
 import { T3WaitingTaskMonitor } from "../apps/dpi-playground-hub/src/t3-waiting-monitor.js";
 
 test("provider retries use bounded exponential backoff, Retry-After and stable jitter", () => {
@@ -206,6 +213,12 @@ test("T3 runtime mode maps project autonomy without promoting read-only roles", 
   assert.equal(t3RuntimeModeFor("RESTRICTED_UNATTENDED", "coder", "WORKSPACE_WRITE"), "auto");
   assert.equal(t3RuntimeModeFor("RESTRICTED_UNATTENDED", "reviewer", "ROLE_DEFAULT"), undefined);
   assert.equal(t3RuntimeModeFor("RESTRICTED_UNATTENDED", "coder", "READ_ONLY"), undefined);
+});
+
+test("T3 Coordinator runtime follows project autonomy without routine approval regressions", () => {
+  assert.equal(t3CoordinatorRuntimeModeFor("SUPERVISED"), "approval-required");
+  assert.equal(t3CoordinatorRuntimeModeFor("AUTHORIZED_AUTONOMY"), "auto-accept-edits");
+  assert.equal(t3CoordinatorRuntimeModeFor("RESTRICTED_UNATTENDED"), "auto");
 });
 
 test("project worker claims a task, sends it to Pi once and commits the answer", async () => {
@@ -740,7 +753,7 @@ test("Coordinator background turns stay visible in T3 through the read-only Coor
     assert.equal(await worker.runOnce("t3-coordinator-project"), true);
     assert.equal(tasks.get("coordinator-result")?.status, "COMPLETED");
     assert.equal(launch?.providerInstanceId, "codex_coordinator_test");
-    assert.equal(launch?.runtimeMode, "approval-required");
+    assert.equal(launch?.runtimeMode, "auto");
     assert.equal(tasks.attempts("coordinator-result")[0]?.runtime?.provider, "codex_coordinator_test");
     assert.equal(projects.getMember("t3-coordinator-project", "coordinator")?.threadProvider, "codex_coordinator_test");
   } finally {
@@ -765,7 +778,7 @@ test("T3 worker reattaches an expired attempt instead of launching duplicate wor
       model: "gpt-6-astra", cwd: t.work,
     });
     tasks.enqueue("t3-recovery", {
-      id: "recover-task", title: "Recover once", maxAttempts: 3,
+      id: "recover-task", title: "Recover once", maxAttempts: 1,
       input: { kind: "agent.message", memberId: "coder", content: "continue original work" },
     });
     const expiredLease = tasks.claim("t3-recovery", "dead-worker", { leaseMs: 1_000 })!;
@@ -796,6 +809,7 @@ test("T3 worker reattaches an expired attempt instead of launching duplicate wor
     assert.equal(recovered, 1);
     assert.equal(tasks.get("recover-task")?.status, "COMPLETED");
     assert.deepEqual(tasks.attempts("recover-task").map((attempt) => attempt.status), ["EXPIRED", "COMPLETED"]);
+    assert.ok(projects.events("t3-recovery").some((event) => event.kind === "task.runtime_recovery_queued"));
     assert.ok(projects.events("t3-recovery").some((event) => event.kind === "t3.turn.recovered"));
 
     tasks.enqueue("t3-recovery", {
@@ -1314,6 +1328,17 @@ test("Local Codex Coordinator receives audited idempotent project coordination t
     assert.match((notification.input as { content: string }).content, /BEGIN UNTRUSTED AGENT OUTPUT/);
     assert.equal((notification.input as { payload?: { coordinationDepth?: number } }).payload?.coordinationDepth, 1);
     assert.equal((notification.input as { payload?: { coordinationRootTaskId?: string } }).payload?.coordinationRootTaskId, "coordinate-task");
+    assert.equal(await worker.runOnce("coordinator-project"), true,
+      "the queued result notice is automatically claimed for the Coordinator inbox");
+    assert.equal(tasks.get(notification.id)?.status, "COMPLETED");
+    assert.match(coordinatorPrompt, /\[Project message: task_result\]/);
+    assert.match(coordinatorPrompt, /Delegated task "Research options" completed/);
+    assert.match(coordinatorPrompt, /BEGIN UNTRUSTED AGENT OUTPUT/);
+    assert.ok(projects.events("coordinator-project").some((event) =>
+      event.kind === "message.completed" &&
+      (event.detail as { taskId?: string }).taskId === notification.id));
+    assert.equal(await worker.runOnce("coordinator-project"), false,
+      "a delivered inbox notice is terminal and is not claimed twice");
   } finally {
     worktrees.close();
     devices.close();
