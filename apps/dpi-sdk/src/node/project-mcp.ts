@@ -8,6 +8,7 @@ import type { ProjectMember, ProjectSummary } from "../api.js";
 import { memberPermissionWithinTemplate, memberRoleCanWrite, t3RuntimeModeFor } from "../execution-policy.js";
 import { durableProjectTeamPlan, durableProjectTemplate } from "../project-templates.js";
 import { ProjectArtifactStore } from "./artifacts.js";
+import { CoordinatorGovernanceStore, HIGH_RISK_OPERATION_KINDS, ROUTINE_OPERATION_KINDS } from "./coordinator-governance.js";
 import { DEFAULT_CODEX_MODEL } from "./codex-model-catalog.js";
 import {
   inspectLocalModelProviders,
@@ -315,6 +316,33 @@ const DATA_SOURCE_OPTIONS_TOOL = {
 
 const PROJECT_TOOLS = [
   {
+    name: "route_coordinator_work",
+    description: "Coordinator-only: deterministically classify a request, persist the authoritative coordination or bounded direct-work bypass record, and return the smallest Agent, remote-data, verification and parameter-bound approval plan before any delegation.",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        request_id: { type: "string", minLength: 1, maxLength: 240 },
+        title: { type: "string", minLength: 1, maxLength: 240 },
+        work_kind: { type: "string", enum: ["question", "inspection", "edit", "implementation", "research"] },
+        workstream_count: { type: "integer", minimum: 1, maximum: 64, default: 1 },
+        estimated_files: { type: "integer", minimum: 0, maximum: 100000, default: 0 },
+        independent_verification: { type: "boolean", default: false },
+        remote_data_requested: { type: "boolean", default: false },
+        operations: { type: "array", maxItems: 100, items: { type: "object", properties: {
+          kind: { type: "string", enum: [...ROUTINE_OPERATION_KINDS, ...HIGH_RISK_OPERATION_KINDS] }, parameters: {},
+        }, required: ["kind"], additionalProperties: false } },
+      },
+      required: ["request_id", "title", "work_kind"], additionalProperties: false,
+    },
+  },
+  {
+    name: "list_coordinator_work",
+    description: "Coordinator-only: list structured routing, progress and bounded bypass records visible to the parent T3 thread.",
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    inputSchema: { type: "object", properties: { limit: { type: "integer", minimum: 1, maximum: 100, default: 50 } }, additionalProperties: false },
+  },
+  {
     name: "get_durable_project",
     description: "Read this T3 thread's Durable Pi project policy and caller identity.",
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -607,7 +635,7 @@ const PROJECT_TOOLS = [
   {
     name: "delegate_durable_task",
     description:
-      "Coordinator-only: idempotently queue a durable task for another active Agent. Project concurrency, dependency and retry limits are enforced by the scheduler.",
+      "Coordinator-only: idempotently queue a durable task for another active Agent. First call route_coordinator_work and pass its SUBSTANTIVE record id as coordination_id. Project concurrency, dependency and retry limits are enforced by the scheduler.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: {
       type: "object",
@@ -816,6 +844,7 @@ export class DurableProjectMcpServer {
   private readonly tasks: ProjectTaskStore;
   private readonly memories: ProjectMemoryStore;
   private readonly artifacts: ProjectArtifactStore;
+  private readonly governance: CoordinatorGovernanceStore;
   private readonly dataSourceCatalogPath: string;
   private handoffs?: ProjectHandoffStore;
   private relays?: ProjectRelayStore;
@@ -827,6 +856,7 @@ export class DurableProjectMcpServer {
     this.tasks = new ProjectTaskStore(databasePath);
     this.memories = new ProjectMemoryStore(databasePath);
     this.artifacts = new ProjectArtifactStore(databasePath, options.artifactRoot, options.artifactMaxBytes);
+    this.governance = new CoordinatorGovernanceStore(databasePath);
     this.dataSourceCatalogPath = options.dataSourceCatalogPath ?? `${dpiHome()}${sep}data-sources.json`;
   }
 
@@ -1119,6 +1149,43 @@ export class DurableProjectMcpServer {
     try {
       const { project, member } = this.resolveContext();
       switch (name) {
+        case "route_coordinator_work": {
+          if (!coordinator(member)) throw Error("Only the project Coordinator may route work");
+          const requestId = requiredText(args.request_id, "request_id", 240);
+          const title = requiredText(args.title, "title", 240);
+          const workKind = requiredText(args.work_kind, "work_kind", 32);
+          if (!["question", "inspection", "edit", "implementation", "research"].includes(workKind))
+            throw Error("Invalid work_kind");
+          const workstreamCount = args.workstream_count === undefined ? 1 : optionalInteger(args.workstream_count, "workstream_count", 1, 64)!;
+          const estimatedFiles = args.estimated_files === undefined ? 0 : optionalInteger(args.estimated_files, "estimated_files", 0, 100_000)!;
+          if (args.independent_verification !== undefined && typeof args.independent_verification !== "boolean")
+            throw Error("independent_verification must be a boolean");
+          if (args.remote_data_requested !== undefined && typeof args.remote_data_requested !== "boolean")
+            throw Error("remote_data_requested must be a boolean");
+          if (args.operations !== undefined && !Array.isArray(args.operations)) throw Error("operations must be an array");
+          const allowedOperations = new Set<string>([...ROUTINE_OPERATION_KINDS, ...HIGH_RISK_OPERATION_KINDS]);
+          const operations = (args.operations ?? []).map((value) => {
+            const operation = object(value, "operation");
+            const kind = requiredText(operation.kind, "operation.kind", 80);
+            if (!allowedOperations.has(kind)) throw Error(`Unsupported operation kind: ${kind}`);
+            return { kind, ...(operation.parameters === undefined ? {} : { parameters: operation.parameters }) };
+          });
+          const record = this.governance.route(project.id, member.id, requestId, title, {
+            workKind: workKind as "question" | "inspection" | "edit" | "implementation" | "research",
+            workstreamCount, estimatedFiles,
+            independentVerification: args.independent_verification === true,
+            remoteDataRequested: args.remote_data_requested === true,
+            operations: operations as never,
+          });
+          return toolResult({ record, autonomyMode: project.autonomyMode,
+            progress: { phase: record.status, coordinationId: record.id, visibleInParentThread: true },
+            protectedProviderBoundary: PROTECTED_PROVIDER_MESSAGE });
+        }
+        case "list_coordinator_work": {
+          if (!coordinator(member)) throw Error("Only the project Coordinator may list routed work");
+          const limit = boundedLimit(args.limit, 50, 100);
+          return toolResult({ projectId: project.id, records: this.governance.list(project.id, limit) });
+        }
         case "get_durable_project":
           return toolResult({
             project: {
@@ -1977,6 +2044,12 @@ export class DurableProjectMcpServer {
           if (!coordinator(member)) throw Error("Only the project Coordinator may delegate durable tasks");
           const requestId = requiredText(args.request_id, "request_id", 240);
           const coordinationId = requiredText(args.coordination_id, "coordination_id", 128);
+          const coordination = this.governance.get(project.id, coordinationId);
+          if (!coordination) throw Error("Delegation requires an authoritative Durable coordination record");
+          if (coordination.coordinatorMemberId !== member.id)
+            throw Error("Coordination record belongs to another Coordinator");
+          if (coordination.classification !== "SUBSTANTIVE")
+            throw Error("Direct-work bypass records cannot authorize multi-Agent delegation");
           const targetId = requiredText(args.target_member_id, "target_member_id", 64);
           const target = project.members.find((candidate) => candidate.id === targetId && candidate.lifecycleState !== "ARCHIVED");
           if (!target) throw Error("Target member is not active in this project");
@@ -2016,7 +2089,7 @@ export class DurableProjectMcpServer {
             whenBusy: "followUp",
             waitMs: 300_000,
           };
-          return toolResult(this.tasks.enqueueCoordination(
+          const task = this.tasks.enqueueCoordination(
             project.id,
             {
               id,
@@ -2032,7 +2105,10 @@ export class DurableProjectMcpServer {
               maxDelegatedTasksPerTurn: project.maxDelegatedTasksPerTurn ?? 8,
               maxActiveProjectTasks: project.maxActiveTasks ?? 64,
             },
-          ));
+          );
+          const progress = this.governance.markDelegated(project.id, coordinationId);
+          return toolResult({ ...task, coordination: progress,
+            progress: { phase: progress.status, coordinationId, delegatedTaskId: task.id, visibleInParentThread: true } });
         }
         case "materialize_durable_agent": {
           if (!coordinator(member)) throw Error("Only the project Coordinator may materialize planned Agents");
@@ -2603,6 +2679,7 @@ export class DurableProjectMcpServer {
     this.relays?.close();
     this.handoffs?.close();
     this.artifacts.close();
+    this.governance.close();
     this.memories.close();
     this.tasks.close();
     this.projects.close();

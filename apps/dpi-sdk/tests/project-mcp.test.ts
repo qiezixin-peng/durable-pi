@@ -73,6 +73,8 @@ test("project MCP exposes bounded read-only project tools without leaking anothe
     assert.deepEqual(
       (listed?.result as { tools: { name: string }[] }).tools.map((tool) => tool.name),
       [
+        "route_coordinator_work",
+        "list_coordinator_work",
         "get_durable_project",
         "list_durable_agents",
         "list_durable_execution_targets",
@@ -109,7 +111,7 @@ test("project MCP exposes bounded read-only project tools without leaking anothe
       ],
     );
     assert.equal(
-      (listed?.result as { tools: { annotations: { readOnlyHint: boolean } }[] }).tools[0]?.annotations.readOnlyHint,
+      (listed?.result as { tools: { annotations: { readOnlyHint: boolean } }[] }).tools[1]?.annotations.readOnlyHint,
       true,
     );
 
@@ -428,6 +430,7 @@ test("project MCP writes idempotent private memory and restricts shared memory t
 
 test("project MCP lets only the Coordinator idempotently delegate bounded durable tasks", async () => {
   const { database, coordinator, coder } = await fixture();
+  let coordinationId = "missing";
   const call = (server: DurableProjectMcpServer, requestId: string, targetMemberId = coder.id) => server.handle({
     jsonrpc: "2.0",
     id: requestId,
@@ -436,7 +439,7 @@ test("project MCP lets only the Coordinator idempotently delegate bounded durabl
       name: "delegate_durable_task",
       arguments: {
         request_id: requestId,
-        coordination_id: "t3-turn-1",
+        coordination_id: coordinationId,
         target_member_id: targetMemberId,
         content: "Inspect the scheduler and report risks.",
         title: "Inspect scheduler",
@@ -450,6 +453,11 @@ test("project MCP lets only the Coordinator idempotently delegate bounded durabl
     projectId: "alpha", memberId: coder.id, databasePath: database,
   });
   try {
+    const routed = await coordinatorServer.handle({ jsonrpc: "2.0", id: "route-1", method: "tools/call", params: {
+      name: "route_coordinator_work", arguments: { request_id: "route-1", title: "Inspect scheduler",
+        work_kind: "implementation", workstream_count: 2, independent_verification: true },
+    } });
+    coordinationId = (routed?.result as { structuredContent: { record: { id: string } } }).structuredContent.record.id;
     const first = await call(coordinatorServer, "delegate-1");
     const replay = await call(coordinatorServer, "delegate-1");
     const firstTask = (first?.result as { structuredContent: { id: string; input: { memberId: string } } }).structuredContent;
@@ -463,6 +471,71 @@ test("project MCP lets only the Coordinator idempotently delegate bounded durabl
   } finally {
     coderServer.close();
     coordinatorServer.close();
+  }
+});
+
+test("coordinator governance automatically permits routine work and parameter-binds high-risk approval", async () => {
+  const { database, coordinator, coder } = await fixture();
+  const server = new DurableProjectMcpServer({ projectId: "alpha", memberId: coordinator.id, databasePath: database });
+  const route = (requestId: string, operations: unknown[], workKind = "inspection") => server.handle({
+    jsonrpc: "2.0", id: requestId, method: "tools/call", params: { name: "route_coordinator_work", arguments: {
+      request_id: requestId, title: requestId, work_kind: workKind, operations,
+    } },
+  });
+  try {
+    const routine = await route("routine", [
+      { kind: "read_search" }, { kind: "safe_workspace_edit", parameters: { root: "workspace" } },
+      { kind: "build_test_lint" }, { kind: "local_git_commit" },
+    ]);
+    const direct = (routine?.result as { structuredContent: { record: {
+      classification: string; bypassReason: string; plan: { operations: Array<{ approvalRequired: boolean }> };
+    } } }).structuredContent.record;
+    assert.equal(direct.classification, "DIRECT");
+    assert.match(direct.bypassReason, /^direct:inspection/);
+    assert.deepEqual(direct.plan.operations.map((operation) => operation.approvalRequired), [false, false, false, false]);
+
+    const risky = await route("risky", [
+      { kind: "publish_push_deploy", parameters: { remote: "origin", ref: "refs/heads/main" } },
+    ], "implementation");
+    const governed = (risky?.result as { structuredContent: { record: { id: string; classification: string; plan: {
+      agentRoles: string[]; verificationScope: string; operations: Array<{
+        approvalRequired: boolean; approvalBinding: unknown;
+      }>;
+    } } } }).structuredContent.record;
+    assert.equal(governed.classification, "SUBSTANTIVE");
+    assert.deepEqual(governed.plan.agentRoles, ["coder"]);
+    assert.equal(governed.plan.verificationScope, "focused");
+    assert.equal(governed.plan.operations[0]!.approvalRequired, true);
+    assert.deepEqual(governed.plan.operations[0]!.approvalBinding, { remote: "origin", ref: "refs/heads/main" });
+
+    const unboundRisk = await route("unbound-risk", [{ kind: "publish_push_deploy" }], "implementation");
+    assert.match((unboundRisk?.result as { content: Array<{ text: string }> }).content[0]!.text,
+      /requires a non-empty parameter object/);
+
+    const small = await route("small-implementation", [{ kind: "safe_workspace_edit" }], "implementation");
+    const bounded = (small?.result as { structuredContent: { record: {
+      classification: string; plan: { agentRoles: string[] };
+    } } }).structuredContent.record;
+    assert.equal(bounded.classification, "DIRECT");
+    assert.deepEqual(bounded.plan.agentRoles, []);
+
+    const verified = await server.handle({ jsonrpc: "2.0", id: "verified", method: "tools/call", params: {
+      name: "route_coordinator_work", arguments: { request_id: "verified", title: "verified",
+        work_kind: "implementation", estimated_files: 2, independent_verification: true },
+    } });
+    const verifiedPlan = (verified?.result as { structuredContent: { record: {
+      plan: { agentRoles: string[] };
+    } } }).structuredContent.record.plan;
+    assert.deepEqual(verifiedPlan.agentRoles, ["coder", "tester"]);
+
+    const ungoverned = await server.handle({ jsonrpc: "2.0", id: "ungoverned", method: "tools/call", params: {
+      name: "delegate_durable_task", arguments: { request_id: "ungoverned", coordination_id: "invented",
+        target_member_id: coder.id, content: "Do work" },
+    } });
+    assert.match((ungoverned?.result as { content: Array<{ text: string }> }).content[0]!.text,
+      /authoritative Durable coordination record/);
+  } finally {
+    server.close();
   }
 });
 
@@ -545,12 +618,17 @@ test("project MCP cancellation is limited to tasks delegated by the same Coordin
     },
   });
   try {
+    const routed = await server.handle({ jsonrpc: "2.0", id: "route-cancel", method: "tools/call", params: {
+      name: "route_coordinator_work", arguments: { request_id: "route-cancel", title: "Cancellation test",
+        work_kind: "implementation", workstream_count: 2 },
+    } });
+    const coordinationId = (routed?.result as { structuredContent: { record: { id: string } } }).structuredContent.record.id;
     const delegated = await server.handle({
       jsonrpc: "2.0", id: "delegate-cancel", method: "tools/call", params: {
         name: "delegate_durable_task",
         arguments: {
           request_id: "delegate-cancel",
-          coordination_id: "cancel-turn",
+          coordination_id: coordinationId,
           target_member_id: coder.id,
           content: "Wait for cancellation",
         },
