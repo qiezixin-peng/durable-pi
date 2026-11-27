@@ -447,6 +447,14 @@ export class T3McpClient {
     return this.structured(await this.callTool("t3_thread_read", input), "t3_thread_read");
   }
 
+  async organizeThread(input: {
+    threadId: string;
+    action: "archive" | "unarchive";
+    environmentId?: string;
+  }) {
+    return this.structured(await this.callTool("t3_thread_organize", input), "t3_thread_organize");
+  }
+
   async environmentLinks() {
     const result = this.structured(await this.callTool("t3_environment_links", {}), "t3_environment_links");
     if (!Array.isArray(result.links)) throw Error("T3 MCP environment links returned no links array");

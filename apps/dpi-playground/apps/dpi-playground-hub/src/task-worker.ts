@@ -1688,6 +1688,11 @@ export class ProjectAgentTaskWorker {
                 runtimeMode: t3RuntimeMode!,
                 interactionMode: "default",
                 environmentId: member.t3EnvironmentId,
+                // A linked environment is an execution target, not a manual
+                // provisioning prerequisite. Register this exact authorized
+                // workspace with the remote T3 on first use when necessary.
+                registerProjectIfMissing: true,
+                projectTitle: `${this.projects.get(lease.projectId)?.name ?? "Durable"} · ${member.name}`.slice(0, 240),
                 ...(member.threadId && member.threadRuntime === "t3" && member.threadModel === modelId &&
                     member.threadProvider === resolvedT3Provider
                   ? { existingThreadId: member.threadId }
@@ -1985,6 +1990,8 @@ export class ProjectAgentTaskWorker {
               runtimeMode: t3RuntimeMode!,
               interactionMode: "default",
               environmentId: member.t3EnvironmentId,
+              registerProjectIfMissing: true,
+              projectTitle: `${this.projects.get(lease.projectId)?.name ?? "Durable"} · ${member.name}`.slice(0, 240),
               ...(member.threadId && member.threadRuntime === "t3" &&
                   member.threadModel === selected.qualified && member.threadProvider === activeT3ProviderInstanceId
                 ? { existingThreadId: member.threadId }
@@ -2148,7 +2155,10 @@ export class ProjectAgentTaskWorker {
       });
       return;
     }
-    if (member.executor === "codex" && member.threadId) {
+    // T3 owns the user-visible thread lifecycle. Keep a completed temporary
+    // worker visible for the configured idle window; the lifecycle monitor
+    // archives it later. Non-T3 runtimes retain their existing eager cleanup.
+    if (member.executor === "codex" && member.threadId && member.threadRuntime !== "t3") {
       const cleanup = this.codexClientFactory();
       try {
         await cleanup.archiveThread?.(member.threadId);

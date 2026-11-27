@@ -19,10 +19,12 @@ import {
   inspectLocalModelProviders,
   isLocalPiModel,
   isWorkspacePiMember,
+  normalizeProviderAlias,
   parseModelSelection,
   resolveLocalRoleModel,
 } from "./local-model-providers.js";
 import { isDurableDelegationAllowed, PROTECTED_PROVIDER_MESSAGE } from "./provider-isolation.js";
+import { defaultFallbackPolicy, unifiedProviderPolicy } from "./provider-policy.js";
 import { DataSourceBindingStore, ReadOnlyDataSourceCatalog } from "./data-sources.js";
 import { ProjectHandoffStore } from "./handoffs.js";
 import { ProjectMemoryStore } from "./memories.js";
@@ -234,6 +236,55 @@ const boundedLimit = (value: unknown, fallback: number, maximum: number) => {
     throw Error(`limit must be an integer from 1 to ${maximum}`);
   return value as number;
 };
+
+const delegationRoleSignals: ReadonlyArray<readonly [RegExp, readonly string[]]> = [
+  [/(?:test|spec|verify|validation|qa|测试|验证|验收)/iu, ["tester", "qa"]],
+  [/(?:review|audit|inspect|security|审查|审核|安全|复核)/iu, ["reviewer", "auditor", "security"]],
+  [/(?:architect|design|plan|架构|设计|方案)/iu, ["architect", "planner"]],
+  [/(?:research|investigate|document|docs|调研|研究|文档)/iu, ["researcher", "docs", "documenter"]],
+  [/(?:implement|code|fix|build|refactor|develop|实现|编码|修复|构建|重构|开发|修改)/iu, ["coder", "developer", "implementer"]],
+];
+
+function selectAutomaticDelegationTarget(
+  project: ProjectSummary,
+  coordinatorMember: ProjectMember,
+  content: string,
+  title: string,
+  tasks: ProjectTaskStore,
+  env: NodeJS.ProcessEnv,
+) {
+  const text = `${title}\n${content}`;
+  const roleScores = new Map<string, number>();
+  for (const [pattern, roles] of delegationRoleSignals) {
+    if (!pattern.test(text)) continue;
+    for (const role of roles) roleScores.set(role, (roleScores.get(role) ?? 0) + 20);
+  }
+  const candidates = project.members.flatMap((candidate) => {
+    if (candidate.id === coordinatorMember.id || candidate.lifecycleState === "ARCHIVED") return [];
+    if (candidate.model) {
+      const selection = parseModelSelection(
+        candidate.model,
+        candidate.executor === "codex" ? "codex" : undefined,
+        env,
+      );
+      if (!isDurableDelegationAllowed(selection.provider)) return [];
+    }
+    const role = candidate.role.toLowerCase();
+    const roleScore = [...roleScores].reduce(
+      (score, [signalRole, weight]) => score + (role.includes(signalRole) ? weight : 0),
+      0,
+    );
+    const activeLoad = tasks.listForMember(project.id, candidate.id, 100)
+      .filter((task) => ["QUEUED", "RUNNING", "PAUSED"].includes(task.status)).length;
+    return [{ candidate, roleScore, activeLoad }];
+  });
+  candidates.sort((left, right) =>
+    right.roleScore - left.roleScore ||
+    left.activeLoad - right.activeLoad ||
+    left.candidate.createdAt - right.candidate.createdAt ||
+    left.candidate.id.localeCompare(right.candidate.id));
+  return candidates[0]?.candidate;
+}
 
 const requiredText = (value: unknown, label: string, maximum: number) => {
   if (typeof value !== "string" || !value.trim()) throw Error(`${label} is required`);
@@ -646,7 +697,7 @@ const PROJECT_TOOLS = [
   {
     name: "delegate_durable_task",
     description:
-      "Coordinator-only: idempotently queue a durable task for another active Agent. First call route_coordinator_work and pass its SUBSTANTIVE record id as coordination_id. Project concurrency, dependency and retry limits are enforced by the scheduler.",
+      "Coordinator-only: idempotently queue a durable task for another active Agent. Omit target_member_id to let Durable Pi select an eligible active Agent from task intent, role fit and current load. Protected Antigravity targets are never selected. First call route_coordinator_work and pass its SUBSTANTIVE record id as coordination_id. Project concurrency, dependency and retry limits are enforced by the scheduler.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: {
       type: "object",
@@ -665,14 +716,14 @@ const PROJECT_TOOLS = [
           maxItems: 64,
         },
       },
-      required: ["request_id", "coordination_id", "target_member_id", "content"],
+      required: ["request_id", "coordination_id", "content"],
       additionalProperties: false,
     },
   },
   {
     name: "materialize_durable_agent",
     description:
-      "Coordinator-only: idempotently activate one pre-authorized role from this project's team plan. By default, the child inherits the Coordinator model. Writable roles get an isolated worktree when possible. Antigravity is protected and cannot be selected; direct Antigravity sessions use its native team runtime.",
+      "Coordinator-only: idempotently activate one pre-authorized role from this project's team plan. By default, the child inherits the Coordinator model. Writable roles get an isolated worktree when possible. Antigravity is upstream-only and cannot be selected as the Durable child; an Antigravity parent may delegate outward to this eligible Codex or DeepSeek worker.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: {
       type: "object",
@@ -1120,6 +1171,7 @@ export class DurableProjectMcpServer {
             permissionProfile: "READ_ONLY",
             executor: "codex",
             model,
+            ...defaultFallbackPolicy(model),
             cwd,
           });
           memberCreated = true;
@@ -1265,7 +1317,7 @@ export class DurableProjectMcpServer {
           return toolResult({
             projectId: project.id,
             coordinatorModel: member.model ?? DEFAULT_CODEX_MODEL,
-            providerIsolationPolicy: "Antigravity (google/*) is direct-T3-only: users may open it as an interactive Provider and its official runtime may create native subagents, but Durable Agents, schedulers and fallbacks cannot invoke it. DeepSeek remains Durable-eligible.",
+            providerIsolationPolicy: "Antigravity (google/*) is upstream-only: an Antigravity parent may automatically delegate outward to Codex or DeepSeek, but Durable Agents, schedulers and fallbacks cannot invoke Antigravity or access its OAuth/session state.",
             ...summary,
           });
         }
@@ -2061,16 +2113,22 @@ export class DurableProjectMcpServer {
             throw Error("Coordination record belongs to another Coordinator");
           if (coordination.classification !== "SUBSTANTIVE")
             throw Error("Direct-work bypass records cannot authorize multi-Agent delegation");
-          const targetId = requiredText(args.target_member_id, "target_member_id", 64);
-          const target = project.members.find((candidate) => candidate.id === targetId && candidate.lifecycleState !== "ARCHIVED");
-          if (!target) throw Error("Target member is not active in this project");
+          const content = requiredText(args.content, "content", 100_000);
+          const title = args.title === undefined ? content.slice(0, 240) : requiredText(args.title, "title", 240);
+          const targetId = args.target_member_id === undefined
+            ? undefined
+            : requiredText(args.target_member_id, "target_member_id", 64);
+          const target = targetId === undefined
+            ? selectAutomaticDelegationTarget(project, member, content, title, this.tasks, this.options.env ?? process.env)
+            : project.members.find((candidate) => candidate.id === targetId && candidate.lifecycleState !== "ARCHIVED");
+          if (!target) throw Error(targetId === undefined
+            ? "No eligible active Agent is available for automatic delegation"
+            : "Target member is not active in this project");
           if (target.id === member.id) throw Error("Coordinator cannot delegate a durable task to itself");
           if (target.model) {
             const targetSelection = parseModelSelection(target.model, target.executor === "codex" ? "codex" : undefined, this.options.env);
             if (!isDurableDelegationAllowed(targetSelection.provider)) throw Error(PROTECTED_PROVIDER_MESSAGE);
           }
-          const content = requiredText(args.content, "content", 100_000);
-          const title = args.title === undefined ? content.slice(0, 240) : requiredText(args.title, "title", 240);
           const priority = optionalInteger(args.priority, "priority", -1_000, 1_000);
           const maxAttempts = optionalInteger(args.max_attempts, "max_attempts", 1, 20);
           const timeoutMs = optionalInteger(args.timeout_ms, "timeout_ms", 1_000, 86_400_000);
@@ -2146,6 +2204,7 @@ export class DurableProjectMcpServer {
             env: this.options.env,
           });
           if (!isDurableDelegationAllowed(selection.provider)) throw Error(PROTECTED_PROVIDER_MESSAGE);
+          const providerPolicy = defaultFallbackPolicy(selection.qualified);
           const existing = project.members.find((candidate) =>
             !candidate.t3EnvironmentId && candidate.role.trim().toLowerCase() === role
           );
@@ -2203,6 +2262,7 @@ export class DurableProjectMcpServer {
             permissionProfile: planned.permissionProfile,
             executor: selection.executor,
             model: selection.qualified,
+            ...providerPolicy,
             cwd: assignedCwd,
             parentMemberId: member.id,
             spawnRequestId: `team-plan:${role}`,
@@ -2366,7 +2426,11 @@ export class DurableProjectMcpServer {
           const explicitProvider = args.provider === undefined ? undefined : requiredText(args.provider, "provider", 32);
           const explicitModel = args.model === undefined ? undefined : requiredText(args.model, "model", 160);
           const selection = explicitProvider !== undefined || explicitModel !== undefined
-            ? parseModelSelection(explicitModel, explicitProvider, this.options.env)
+            ? (explicitProvider !== undefined && explicitModel === undefined
+                ? parseModelSelection(
+                    unifiedProviderPolicy(normalizeProviderAlias(explicitProvider)).primaryModel,
+                  )
+                : parseModelSelection(explicitModel, explicitProvider, this.options.env))
             : parseModelSelection(template.model, template.executor === "codex" ? "codex" : undefined, this.options.env);
           if (!isDurableDelegationAllowed(selection.provider)) throw Error(PROTECTED_PROVIDER_MESSAGE);
           if (template.t3EnvironmentId && (explicitProvider !== undefined || explicitModel !== undefined)) {
@@ -2456,6 +2520,7 @@ export class DurableProjectMcpServer {
             }
           }
           const inheritFallback = selection.executor === template.executor && selection.qualified === template.model;
+          const selectedProviderPolicy = defaultFallbackPolicy(selection.qualified);
           let agent: ProjectMember;
           try {
             agent = this.projects.addMember(project.id, {
@@ -2475,7 +2540,7 @@ export class DurableProjectMcpServer {
                     allowModelFallback: template.allowModelFallback,
                     fallbackModels: template.fallbackModels,
                   }
-                : {}),
+                : selectedProviderPolicy),
               parentMemberId: member.id,
               ...(scopeTaskId ? { scopeTaskId } : {}),
               spawnRequestId,

@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { ProjectAutonomyMode, ProjectEvent, ProjectMember, ProjectPermissionProfile, ProjectSummary, ProjectTemplateRole } from "../api.js";
 import { isLocalPiModel } from "./local-model-providers.js";
+import { validateProviderChain } from "./provider-policy.js";
 import { dpiHome } from "./registry.js";
 
 export const PROJECT_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -79,6 +80,7 @@ const modelFallbacks = (value: unknown, primary?: string | null) => {
   const result = value.map((item) => clean(item, "Fallback model", 160));
   if (new Set(result).size !== result.length) throw Error("Fallback models must be unique");
   if (primary && result.includes(primary)) throw Error("Primary model cannot also be a fallback model");
+  if (primary) validateProviderChain(primary, result);
   return result;
 };
 

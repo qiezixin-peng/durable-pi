@@ -2386,7 +2386,7 @@ test("Durable workers reject protected Antigravity members without invoking OAut
 
     const geminiTask = tasks.get("gemini-write-task")!;
     assert.equal(geminiTask.status, "FAILED");
-    assert.match(geminiTask.error?.message ?? "", /protected interactive Provider/i);
+    assert.match(geminiTask.error?.message ?? "", /protected upstream Provider/i);
     assert.equal(projects.getMember("local-pi", "gemini-coder")?.threadRuntime, undefined);
     assert.equal(tasks.attempts("gemini-write-task").at(-1)?.runtime, undefined);
     assert.equal(tasks.executionReceipt("gemini-write-task"), undefined);
@@ -2427,8 +2427,15 @@ test("Remote targets reject protected Antigravity even when advertised while ver
   const memories = new ProjectMemoryStore(projects.path);
   const devices = new NetworkRegistry(join(t.root, "hub", "network.sqlite"));
   const providerHealth = new ProviderHealthStore(projects.path, 1, 60_000, 60_000);
-  const calls: Array<{ environmentId?: string; providerInstanceId?: string; model: string; runtimeMode: string }> = [];
-  const verifiedRemoteModels = new Set(["gpt-5.6-sol", "deepseek/deepseek-chat", "google/gemini-4-hydrogen"]);
+  const calls: Array<{
+    environmentId?: string;
+    providerInstanceId?: string;
+    model: string;
+    runtimeMode: string;
+    registerProjectIfMissing?: boolean;
+    projectTitle?: string;
+  }> = [];
+  const verifiedRemoteModels = new Set(["gpt-5.6-sol", "gpt-6-astra", "deepseek/deepseek-chat", "google/gemini-4-hydrogen"]);
   try {
     projects.create({ id: "remote-failover", name: "Remote Failover" });
     projects.addMember("remote-failover", {
@@ -2442,7 +2449,7 @@ test("Remote targets reject protected Antigravity even when advertised while ver
       executor: "codex",
       model: "gpt-5.6-sol",
       allowModelFallback: true,
-      fallbackModels: ["deepseek/deepseek-chat"],
+      fallbackModels: ["gpt-6-astra"],
       cwd: "/home/user/DurablePiProjects/demo",
       t3EnvironmentId: "env-linux-b",
     });
@@ -2509,6 +2516,8 @@ test("Remote targets reject protected Antigravity even when advertised while ver
             providerInstanceId: input.providerInstanceId,
             model: input.model,
             runtimeMode: input.runtimeMode,
+            registerProjectIfMissing: input.registerProjectIfMissing,
+            projectTitle: input.projectTitle,
           });
           await input.onStarted?.({ threadId: `t3-${calls.length}`, runId: `run-${calls.length}`, projectId: "remote-proj" });
           return {
@@ -2541,15 +2550,19 @@ test("Remote targets reject protected Antigravity even when advertised while ver
     assert.deepEqual(calls, [
       {
         environmentId: "env-linux-b",
-        providerInstanceId: "pi_durable_worker",
-        model: "deepseek/deepseek-chat",
-        runtimeMode: "auto-accept-edits",
+        providerInstanceId: "codex_durable_worker",
+        model: "gpt-6-astra",
+        runtimeMode: "auto",
+        registerProjectIfMissing: true,
+        projectTitle: "Remote Failover · Linux Coder",
       },
       {
         environmentId: "env-linux-b",
         providerInstanceId: "pi_durable_worker",
         model: "deepseek/deepseek-chat",
         runtimeMode: "auto-accept-edits",
+        registerProjectIfMissing: true,
+        projectTitle: "Remote Failover · Linux DeepSeek",
       },
     ]);
     assert.equal(tasks.get("failover-task")?.status, "COMPLETED");
@@ -2557,7 +2570,7 @@ test("Remote targets reject protected Antigravity even when advertised while ver
     assert.equal(tasks.get("direct-remote-antigravity")?.status, "FAILED");
     assert.match(
       tasks.get("direct-remote-antigravity")?.error?.message ?? "",
-      /protected interactive Provider/i,
+      /protected upstream Provider/i,
     );
     assert.equal(
       projects.events("remote-failover").some((event) => event.kind === "model.fallback.selected"),

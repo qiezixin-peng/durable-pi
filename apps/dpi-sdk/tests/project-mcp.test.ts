@@ -467,6 +467,25 @@ test("project MCP lets only the Coordinator idempotently delegate bounded durabl
     assert.equal(firstTask.input.memberId, coder.id);
     assert.equal(replayTask.id, firstTask.id);
 
+    const automatic = await coordinatorServer.handle({
+      jsonrpc: "2.0",
+      id: "delegate-auto",
+      method: "tools/call",
+      params: {
+        name: "delegate_durable_task",
+        arguments: {
+          request_id: "delegate-auto",
+          coordination_id: coordinationId,
+          content: "Implement and fix the scheduler race.",
+          title: "Fix scheduler race",
+        },
+      },
+    });
+    assert.equal(
+      (automatic?.result as { structuredContent: { input: { memberId: string } } }).structuredContent.input.memberId,
+      coder.id,
+    );
+
     const denied = await call(coderServer, "delegate-2", coordinator.id);
     assert.equal((denied?.result as { isError: boolean }).isError, true);
     assert.match((denied?.result as { content: { text: string }[] }).content[0]!.text, /Only the project Coordinator/);
@@ -2006,7 +2025,7 @@ test("project MCP exposes protected Antigravity and Durable DeepSeek, inherits r
     assert.equal((protectedCoder?.result as { isError: boolean }).isError, true);
     assert.match(
       (protectedCoder?.result as { content: Array<{ text: string }> }).content[0]!.text,
-      /protected interactive Provider/i,
+      /protected upstream Provider/i,
     );
 
     // Without an explicit override, a child inherits the Coordinator model.
@@ -2082,7 +2101,7 @@ test("project MCP exposes protected Antigravity and Durable DeepSeek, inherits r
     assert.equal((blockedRemoteTemp?.result as { isError: boolean }).isError, true);
     assert.match(
       (blockedRemoteTemp?.result as { content: Array<{ text: string }> }).content[0]!.text,
-      /protected interactive Provider/i,
+      /protected upstream Provider/i,
     );
   } finally {
     server.close();

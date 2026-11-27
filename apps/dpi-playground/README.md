@@ -26,11 +26,17 @@ npm run dev                          # Vite middleware with hot reload (no build
 | `DPI_T3_WORKER_PROVIDER_INSTANCE` | `codex` | built-in T3 Codex Provider reused for worker Agents; the isolated Durable Coordinator remains a separate Provider |
 | `DPI_T3_COORDINATOR_PROVIDER_INSTANCE` | `codex_durable_coordinator` | read-only T3 Codex Provider for visible Coordinator result handling; retains Durable Pi coordination tools |
 
-T3 exposes two deliberately isolated orchestration domains. Codex/DeepSeek projects use Durable Pi for task records,
-leases, permissions, cross-device routing and visible child sessions; children inherit their parent/template model unless
-the user selects another Durable-eligible Provider. Antigravity is a protected interactive Provider: open it directly
-in T3 and let its official runtime perform native task splitting and child-Agent management. Durable Pi never invokes
-Antigravity, never selects it as a fallback, and never sends it work from Codex, DeepSeek or a remote scheduler.
+T3 uses an asymmetric Provider boundary. Antigravity is an upstream-only Provider and may automatically delegate
+suitable work outward to Codex or DeepSeek through Durable Pi without asking the user to select a child Agent.
+Codex/DeepSeek projects retain durable task records, leases, permissions, cross-device routing and visible child
+sessions. Codex, DeepSeek, fallbacks and remote schedulers can never invoke Antigravity or access its OAuth/session
+state. Same-Provider children inherit the parent model unless the router deliberately selects an eligible outward
+Provider for the task.
+
+`delegate_durable_task` accepts an optional target. When omitted, Durable Pi deterministically selects an eligible
+active Agent using task intent, role fit and current queue load; protected Antigravity targets are excluded. Remote
+T3 execution also registers the exact requested working directory as an internal project on first use, so a remote
+machine does not need a manually created matching project before it can receive work.
 
 The device backend supports `DPI_PROVIDER=faux`, `openrouter`, or `openai`. `openai` uses Pi's OAuth credential at `~/.pi/agent/auth.json` by default (`DPI_AUTH_FILE` overrides it), so Sign in with ChatGPT tokens can be shared with the embedded Pi Durable runtime without copying a token into project files. Authenticate through Pi's `/login openai`; never paste the token into the Hub UI or commit `auth.json`.
 

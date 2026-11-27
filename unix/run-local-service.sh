@@ -57,12 +57,12 @@ if [[ -x $repo_root/unix/configure-t3-worker-provider.sh ]]; then
   "$repo_root/unix/configure-t3-worker-provider.sh"
 fi
 
-# Reconcile idle legacy projects with this device's configured Codex model and
-# current on-demand team plan. Active projects are skipped transactionally.
+# Reconcile idle legacy projects with the current Provider fallback policy and
+# on-demand team plan. Active projects are skipped transactionally.
 project_defaults_reconcile=$repo_root/scripts/reconcile-durable-project-defaults.mjs
 projects_database=$dpi_root/projects.sqlite
 if [[ -f $project_defaults_reconcile && -f $projects_database ]]; then
-  node "$project_defaults_reconcile" "$projects_database" "${DPI_COORDINATOR_MODEL:-gpt-5.6-sol}" \
+  node "$project_defaults_reconcile" "$projects_database" \
     >>"$dpi_root/logs/project-defaults-reconcile.log" 2>&1 ||
     printf '%s\n' 'Project-default reconciliation failed; platform startup continues without mutating busy projects.' \
       >>"$dpi_root/logs/project-defaults-reconcile.log"

@@ -62,15 +62,19 @@ test("T3 runtime never substitutes an older run when the activity window is trun
         threadId: "thread-long", runId: "run-current", status: "completed", timedOut: false, next: null,
       }),
       interruptThread: async () => { throw Error("not used"); },
-      readThread: async (input: { view?: string }) => {
-        reads.push(input.view ?? "messages");
+      readThread: async (input: { view?: string; afterPosition?: number }) => {
+        reads.push(`${input.view ?? "messages"}:${input.afterPosition ?? "start"}`);
         return input.view === "activity"
           ? { thread: { projectId: "project-1" }, items: [
               { runId: "run-old", type: "assistant_message", createdBy: "agent", text: "stale answer" },
             ] }
-          : { thread: { projectId: "project-1" }, items: [
-              { runId: "run-current", type: "assistant_message", createdBy: "agent", text: "exact answer" },
-            ] };
+          : input.afterPosition === undefined
+            ? { thread: { projectId: "project-1" }, nextPosition: 100, items: [
+                { runId: "run-old", type: "assistant_message", createdBy: "agent", text: "older page" },
+              ] }
+            : { thread: { projectId: "project-1" }, items: [
+                { runId: "run-current", type: "assistant_message", createdBy: "agent", text: "exact answer" },
+              ] };
       },
       environmentLinks: async () => ({ environmentId: "env-a", links: [], notListed: "" }),
       close: async () => undefined,
@@ -81,7 +85,41 @@ test("T3 runtime never substitutes an older run when the activity window is trun
     model: "gpt-5.6-sol", runtimeMode: "auto",
   });
   assert.equal(result.text, "exact answer");
-  assert.deepEqual(reads, ["activity", "messages"]);
+  assert.deepEqual(reads, ["activity:start", "messages:start", "messages:100"]);
+});
+
+test("T3 runtime restores an archived managed thread before sending new work", async () => {
+  const calls: string[] = [];
+  const gateway = new T3RuntimeGateway({
+    connect: async () => ({
+      initialize: async () => undefined,
+      listProjects: async () => [{ id: "project-1", title: "Demo", workspaceRoot: process.cwd() }],
+      launchThread: async () => { throw Error("not used"); },
+      sendThread: async () => {
+        calls.push("send");
+        return { threadId: "thread-archived", messageId: "message-1", runId: "run-new", status: "completed", delivery: "turn" };
+      },
+      waitThread: async () => ({ threadId: "thread-archived", runId: "run-new", status: "completed", timedOut: false, next: null }),
+      interruptThread: async () => { throw Error("not used"); },
+      readThread: async (input) => {
+        calls.push(`read:${input.view}`);
+        if (calls.length === 1) return { thread: { projectId: "project-1", archived: true }, items: [] };
+        return { thread: { projectId: "project-1", archived: false }, items: [{ type: "assistant_message", runId: "run-new", text: "restored" }] };
+      },
+      organizeThread: async (input) => {
+        calls.push(`organize:${input.action}`);
+        return { sequence: 1 };
+      },
+      environmentLinks: async () => ({ environmentId: "env-a", links: [], notListed: "" }),
+      close: async () => undefined,
+    }),
+  });
+  const result = await gateway.run({
+    cwd: process.cwd(), title: "Resume", message: "Continue", clientRequestId: "restore-1",
+    model: "gpt-5.6-sol", runtimeMode: "auto", existingThreadId: "thread-archived",
+  });
+  assert.equal(result.text, "restored");
+  assert.deepEqual(calls, ["read:activity", "organize:unarchive", "send", "read:activity"]);
 });
 
 test("T3 runtime resumes an existing thread and reports a user wait", async () => {

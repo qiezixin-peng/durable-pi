@@ -59,6 +59,7 @@ import { ProjectAgentTaskWorker, t3CoordinatorRuntimeModeFor, t3RuntimeModeFor }
 import { authenticateRemoteDevice } from "./device-auth.js";
 import { T3WaitingTaskMonitor } from "./t3-waiting-monitor.js";
 import { T3ProjectMonitor } from "./t3-project-monitor.js";
+import { T3ThreadLifecycleMonitor } from "./t3-thread-lifecycle-monitor.js";
 
 const args = process.argv.slice(2);
 const option = (key: string, fallback: string) => {
@@ -1309,7 +1310,7 @@ app.post(
         req.body?.provider === undefined ? undefined : String(req.body.provider),
       );
       if (selection.executor !== "pi")
-        throw Error("Durable Pi workspace members require a deepseek/* model; Antigravity is direct-T3-only");
+        throw Error("Durable Pi workspace members require a deepseek/* model; Antigravity is an upstream-only provider and cannot be selected as a Durable worker target");
       if (!isDurableDelegationAllowed(selection.provider))
         throw Object.assign(Error(PROTECTED_PROVIDER_MESSAGE), { status: 409 });
       if (t3EnvironmentId) {
@@ -1517,7 +1518,7 @@ app.patch(
       if (req.body?.model !== undefined) {
         const parsed = parseModelSelection(requestedModel, req.body?.provider === undefined ? undefined : String(req.body.provider));
         if (parsed.executor !== "pi")
-          throw Error("Durable Pi workspace members require a deepseek/* model; Antigravity is direct-T3-only");
+          throw Error("Durable Pi workspace members require a deepseek/* model; Antigravity is an upstream-only provider and cannot be selected as a Durable worker target");
         if (!isDurableDelegationAllowed(parsed.provider))
           throw Object.assign(Error(PROTECTED_PROVIDER_MESSAGE), { status: 409 });
         requestedModel = parsed.qualified;
@@ -1920,6 +1921,36 @@ const t3EnvironmentMonitor = process.env.DPI_T3_RUNTIME === "1"
   : undefined;
 t3EnvironmentMonitor?.unref?.();
 
+const t3ThreadArchiveAfterMs = intervalEnv(
+  "DPI_T3_THREAD_ARCHIVE_AFTER_MS",
+  24 * 60 * 60_000,
+  60_000,
+  90 * 24 * 60 * 60_000,
+);
+const t3ThreadLifecycle = t3RuntimeGateway
+  ? new T3ThreadLifecycleMonitor(tasks, projects, t3RuntimeGateway, t3ThreadArchiveAfterMs)
+  : undefined;
+let checkingT3ThreadLifecycle = false;
+const checkT3ThreadLifecycle = () => {
+  if (!t3ThreadLifecycle || checkingT3ThreadLifecycle) return;
+  checkingT3ThreadLifecycle = true;
+  void t3ThreadLifecycle.runOnce()
+    .then((result) => {
+      if (result.errors > 0)
+        console.warn(`T3 thread lifecycle monitor could not inspect/archive ${result.errors} thread(s)`);
+    })
+    .catch((error) => console.warn("T3 thread lifecycle monitor failed", error))
+    .finally(() => { checkingT3ThreadLifecycle = false; });
+};
+checkT3ThreadLifecycle();
+const t3ThreadLifecycleTimer = t3ThreadLifecycle
+  ? setInterval(
+      checkT3ThreadLifecycle,
+      intervalEnv("DPI_T3_THREAD_LIFECYCLE_INTERVAL_MS", 60 * 60_000, 60_000),
+    )
+  : undefined;
+t3ThreadLifecycleTimer?.unref?.();
+
 let closing = false;
 const shutdown = async () => {
   if (closing) return;
@@ -1930,6 +1961,7 @@ const shutdown = async () => {
   if (t3EnvironmentMonitor) clearInterval(t3EnvironmentMonitor);
   if (t3WaitingTaskTimer) clearInterval(t3WaitingTaskTimer);
   if (t3ProjectTimer) clearInterval(t3ProjectTimer);
+  if (t3ThreadLifecycleTimer) clearInterval(t3ThreadLifecycleTimer);
   monitor.stop();
   await taskWorker.stop();
   await backups.flush();

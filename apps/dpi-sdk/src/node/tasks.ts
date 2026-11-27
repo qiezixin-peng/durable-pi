@@ -289,6 +289,34 @@ export class ProjectTaskStore {
       }).length;
   }
 
+  /** Every persisted T3 thread used by a project member, including older task
+   * threads no longer stored as that member's current execution thread. */
+  t3ThreadHistory(projectId: string): Array<{
+    memberId: string;
+    threadId: string;
+    environmentId?: string;
+  }> {
+    const rows = this.db.prepare(
+      `SELECT t.input_json,a.runtime_binding_json
+       FROM project_tasks t JOIN task_attempts a ON a.task_id=t.id
+       WHERE t.project_id=? AND a.runtime_binding_json IS NOT NULL
+       ORDER BY a.started_at,a.id`,
+    ).all(projectId) as Array<{ input_json: string; runtime_binding_json: string }>;
+    const unique = new Map<string, { memberId: string; threadId: string; environmentId?: string }>();
+    for (const row of rows) {
+      const memberId = targetMemberId(row.input_json);
+      const runtime = JSON.parse(row.runtime_binding_json) as ProjectTaskRuntimeBinding;
+      if (!memberId || runtime.kind !== "t3" || !runtime.threadId) continue;
+      const candidate = {
+        memberId,
+        threadId: runtime.threadId,
+        ...(runtime.environmentId ? { environmentId: runtime.environmentId } : {}),
+      };
+      unique.set(`${runtime.environmentId ?? "local"}\0${runtime.threadId}`, candidate);
+    }
+    return [...unique.values()];
+  }
+
   /** Current per-Agent queue projection for coordination decisions. Task input
    * and results are deliberately excluded; only bounded scheduling metadata is
    * returned. */

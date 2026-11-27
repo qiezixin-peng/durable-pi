@@ -83,6 +83,16 @@ if ($env:DPI_T3_RUNTIME -eq '1') {
     $providerParams.EnablePiWorker = $true
   }
   $providerChanged = & (Join-Path $PSScriptRoot 'configure-t3-worker-provider.ps1') @providerParams
+  $antigravityUsageSync = Join-Path $PSScriptRoot 'sync-t3-antigravity-usage-token.ps1'
+  if (-not [string]::IsNullOrWhiteSpace($providerParams.AntigravityBinaryPath) -and
+      (Test-Path -LiteralPath $antigravityUsageSync)) {
+    try {
+      & $antigravityUsageSync -InstanceId 'antigravity' *>> (Join-Path $logDir 'antigravity-usage-sync.log')
+    } catch {
+      Add-Content -LiteralPath (Join-Path $logDir 'antigravity-usage-sync.log') `
+        -Value ("Antigravity usage sync failed without changing the CLI login: " + $_.Exception.Message)
+    }
+  }
   if ($providerChanged -eq $true) {
     & t3 service restart | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'T3 service restart failed after configuring the worker Provider.' }
@@ -90,14 +100,13 @@ if ($env:DPI_T3_RUNTIME -eq '1') {
 }
 
 # Upgrade legacy projects only while they are idle. This keeps existing T3
-# workspaces usable after team-plan or device-model defaults change, without
+# workspaces usable after team-plan or Provider fallback defaults change, without
 # rewriting a project that currently owns an active Durable task.
 $projectDefaultsReconcile = Join-Path $repoRoot 'scripts\reconcile-durable-project-defaults.mjs'
 $projectsDatabase = Join-Path $dpiRoot 'projects.sqlite'
 if ((Test-Path -LiteralPath $projectDefaultsReconcile) -and (Test-Path -LiteralPath $projectsDatabase)) {
   $reconcileLog = Join-Path $logDir 'project-defaults-reconcile.log'
-  & node $projectDefaultsReconcile $projectsDatabase `
-    $(if ($env:DPI_COORDINATOR_MODEL) { $env:DPI_COORDINATOR_MODEL } else { 'gpt-5.6-sol' }) *>> $reconcileLog
+  & node $projectDefaultsReconcile $projectsDatabase *>> $reconcileLog
   if ($LASTEXITCODE -ne 0) {
     Add-Content -LiteralPath $reconcileLog -Value 'Project-default reconciliation failed; platform startup continues without mutating busy projects.'
   }

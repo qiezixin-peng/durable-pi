@@ -2,11 +2,15 @@ import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 const databasePath = resolve(process.argv[2] ?? "");
-const model = (process.argv[3] ?? "gpt-5.6-sol").trim();
-if (!process.argv[2] || !/^[A-Za-z0-9._-]{1,160}$/.test(model)) {
-  console.error("Usage: node scripts/reconcile-durable-project-defaults.mjs <projects.sqlite> [model]");
+if (!process.argv[2]) {
+  console.error("Usage: node scripts/reconcile-durable-project-defaults.mjs <projects.sqlite>");
   process.exit(2);
 }
+
+const providerPolicies = [
+  { primaryModel: "gpt-5.6-sol", fallbackModels: ["gpt-6-astra", "gpt-6.1-sol"] },
+  { primaryModel: "deepseek/deepseek-flash", fallbackModels: ["deepseek/deepseek-v4-pro"] },
+];
 
 const genericPlan = [
   { role: "coordinator", permissionProfile: "READ_ONLY" },
@@ -40,9 +44,10 @@ try {
     `SELECT COUNT(*) AS count FROM project_tasks
      WHERE project_id=? AND status NOT IN ('COMPLETED','FAILED','CANCELLED')`,
   );
-  const updateModels = database.prepare(
-    `UPDATE project_members SET model=?
-     WHERE project_id=? AND executor='codex' AND lifecycle_state!='ARCHIVED' AND model IS NOT ?`,
+  const updateFallbackPolicy = database.prepare(
+    `UPDATE project_members SET allow_model_fallback=1,fallback_models_json=?
+     WHERE project_id=? AND lifecycle_state!='ARCHIVED' AND model=?
+       AND (allow_model_fallback!=1 OR fallback_models_json IS NOT ?)`,
   );
   const updateBlank = database.prepare(
     `UPDATE projects SET template_plan_json=?,description=?,max_concurrent_tasks=?,updated_at=? WHERE id=?`,
@@ -62,7 +67,16 @@ try {
       continue;
     }
     const now = Date.now();
-    const changedMembers = Number(updateModels.run(model, project.id, model).changes);
+    let changedMembers = 0;
+    for (const policy of providerPolicies) {
+      const fallbackModelsJson = JSON.stringify(policy.fallbackModels);
+      changedMembers += Number(updateFallbackPolicy.run(
+        fallbackModelsJson,
+        project.id,
+        policy.primaryModel,
+        fallbackModelsJson,
+      ).changes);
+    }
     const upgradeBlank = project.template_id === "blank" && isLegacyBlankPlan(project.template_plan_json);
     if (upgradeBlank) {
       updateBlank.run(
@@ -78,8 +92,8 @@ try {
     }
     if (changedMembers > 0 || upgradeBlank) {
       insertEvent.run(project.id, "project.defaults.reconciled", JSON.stringify({
-        model,
         membersUpdated: changedMembers,
+        providerFallbackPolicies: providerPolicies,
         blankTeamPlanUpgraded: upgradeBlank,
         templatePlan: upgradeBlank ? genericPlan : undefined,
       }), now);
@@ -89,7 +103,7 @@ try {
   database.exec("COMMIT");
   process.stdout.write(`${JSON.stringify({
     databasePath,
-    model,
+    providerFallbackPolicies: providerPolicies,
     projects: projects.length,
     membersUpdated,
     blankPlansUpdated,

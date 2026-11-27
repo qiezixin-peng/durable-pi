@@ -61,7 +61,10 @@ export interface T3RuntimeStatus {
 type RuntimeSession = Pick<
   T3McpClient,
   "initialize" | "listProjects" | "launchThread" | "sendThread" | "waitThread" | "interruptThread" | "readThread" | "environmentLinks" | "close"
-> & { createProject?: T3McpClient["createProject"] };
+> & {
+  createProject?: T3McpClient["createProject"];
+  organizeThread?: T3McpClient["organizeThread"];
+};
 
 export interface T3RuntimeGatewayOptions {
   t3?: T3CodeClientOptions;
@@ -127,6 +130,49 @@ export class T3RuntimeGateway {
       throw new T3EnvironmentUnavailableError(environmentId, "not-linked", `T3 environment ${environmentId} is not linked`);
     if (link.status.toLowerCase() !== "reachable")
       throw new T3EnvironmentUnavailableError(environmentId, link.status, `T3 environment ${link.label} is ${link.status}`);
+  }
+
+  async inspectThread(input: {
+    threadId: string;
+    environmentId?: string;
+    runtimeMode?: T3RuntimeMode;
+  }) {
+    const session = await this.connect(input.runtimeMode ?? "auto");
+    try {
+      await session.initialize();
+      await this.requireEnvironment(session, input.environmentId);
+      return await session.readThread({
+        ...(input.environmentId ? { environmentId: input.environmentId } : {}),
+        threadId: input.threadId,
+        view: "activity",
+        limit: 1,
+        runLimit: 1,
+        maxCharsPerItem: 1_000,
+      });
+    } finally {
+      await session.close();
+    }
+  }
+
+  async organizeThread(input: {
+    threadId: string;
+    action: "archive" | "unarchive";
+    environmentId?: string;
+    runtimeMode?: T3RuntimeMode;
+  }) {
+    const session = await this.connect(input.runtimeMode ?? "auto");
+    try {
+      await session.initialize();
+      await this.requireEnvironment(session, input.environmentId);
+      if (!session.organizeThread) throw Error("T3 runtime does not support thread organization");
+      return await session.organizeThread({
+        ...(input.environmentId ? { environmentId: input.environmentId } : {}),
+        threadId: input.threadId,
+        action: input.action,
+      });
+    } finally {
+      await session.close();
+    }
   }
 
   private async finish(
@@ -198,18 +244,25 @@ export class T3RuntimeGateway {
     );
     let answer = assistantMessages.filter((item) => item.runId === input.runId).at(-1);
     if (!answer && status === "completed") {
-      const messagesRead = await session.readThread({
-        ...(input.environmentId ? { environmentId: input.environmentId } : {}),
-        threadId: input.threadId,
-        view: "messages",
-        limit: 100,
-        runLimit: 50,
-        maxCharsPerItem: 20_000,
-      });
-      const messages = Array.isArray(messagesRead.items) ? messagesRead.items as JsonObject[] : [];
-      answer = messages.filter((item) =>
-        item.type === "assistant_message" && item.runId === input.runId && typeof item.text === "string"
-      ).at(-1);
+      let afterPosition: number | undefined;
+      for (let pageNumber = 0; pageNumber < 50; pageNumber += 1) {
+        const messagesRead = await session.readThread({
+          ...(input.environmentId ? { environmentId: input.environmentId } : {}),
+          threadId: input.threadId,
+          view: "messages",
+          ...(afterPosition !== undefined ? { afterPosition } : {}),
+          limit: 100,
+          runLimit: 50,
+          maxCharsPerItem: 20_000,
+        });
+        const messages = Array.isArray(messagesRead.items) ? messagesRead.items as JsonObject[] : [];
+        answer = messages.filter((item) =>
+          item.type === "assistant_message" && item.runId === input.runId && typeof item.text === "string"
+        ).at(-1) ?? answer;
+        const nextPosition = typeof messagesRead.nextPosition === "number" ? messagesRead.nextPosition : undefined;
+        if (nextPosition === undefined || nextPosition === afterPosition) break;
+        afterPosition = nextPosition;
+      }
     }
     const text = typeof answer?.text === "string" ? answer.text : "";
     if (status === "completed" && !text) throw Error("T3 runtime completed without an agent result");
@@ -331,6 +384,27 @@ export class T3RuntimeGateway {
       }
       if (!project) throw Error(`T3 has no registered project containing ${input.cwd}`);
 
+      if (input.existingThreadId) {
+        const current = await session.readThread({
+          ...(input.environmentId ? { environmentId: input.environmentId } : {}),
+          threadId: input.existingThreadId,
+          view: "activity",
+          limit: 1,
+          runLimit: 1,
+          maxCharsPerItem: 1_000,
+        });
+        const thread = current.thread && typeof current.thread === "object" && !Array.isArray(current.thread)
+          ? current.thread as JsonObject
+          : undefined;
+        if (thread?.archived === true) {
+          if (!session.organizeThread) throw Error("T3 runtime cannot restore an archived thread");
+          await session.organizeThread({
+            ...(input.environmentId ? { environmentId: input.environmentId } : {}),
+            threadId: input.existingThreadId,
+            action: "unarchive",
+          });
+        }
+      }
       const started = input.existingThreadId
         ? await session.sendThread({
             ...(input.environmentId ? { environmentId: input.environmentId } : {}),
